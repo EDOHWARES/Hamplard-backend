@@ -57,10 +57,24 @@ export class RefundsService {
       );
     }
 
+    // Issue #250: Sum previously processed/approved refunds and cap new requests at remaining balance
+    const previousRefunds = await this.prisma.refund.aggregate({
+      where: {
+        enrollmentId: dto.enrollmentId,
+        status: { in: [RefundStatus.PROCESSED, RefundStatus.APPROVED] },
+      },
+      _sum: { approvedAmount: true },
+    });
+
     const amountPaid = Number(enrollment.amountPaid);
+    const previouslyRefunded = Number(previousRefunds._sum.approvedAmount || 0);
+    const remainingBalance = amountPaid - previouslyRefunded;
+
     const requestedAmount = dto.requestedAmount ?? amountPaid;
-    if (requestedAmount > amountPaid) {
-      throw new BadRequestException('Requested amount cannot exceed the amount paid');
+    if (requestedAmount > remainingBalance) {
+      throw new BadRequestException(
+        `Requested amount cannot exceed remaining balance (${remainingBalance} USDC)`,
+      );
     }
 
     const refund = await this.prisma.refund.create({
@@ -137,13 +151,29 @@ export class RefundsService {
       where: { id: refund.enrollmentId },
     });
 
+    // Issue #250: Sum previously processed/approved refunds and cap approvals at remaining balance
+    const previousRefunds = await this.prisma.refund.aggregate({
+      where: {
+        enrollmentId: refund.enrollmentId,
+        status: { in: [RefundStatus.PROCESSED, RefundStatus.APPROVED] },
+        id: { not: id }, // Exclude current refund
+      },
+      _sum: { approvedAmount: true },
+    });
+
+    const amountPaid = Number(enrollment.amountPaid);
+    const previouslyRefunded = Number(previousRefunds._sum.approvedAmount || 0);
+    const remainingBalance = amountPaid - previouslyRefunded;
+
     const requestedAmount = Number(refund.requestedAmount);
     const approvedAmount = dto.approvedAmount ?? requestedAmount;
     if (approvedAmount > requestedAmount) {
       throw new BadRequestException('Approved amount cannot exceed the requested amount');
     }
-    if (approvedAmount > Number(enrollment.amountPaid)) {
-      throw new BadRequestException('Approved amount cannot exceed the amount paid');
+    if (approvedAmount > remainingBalance) {
+      throw new BadRequestException(
+        `Approved amount cannot exceed remaining balance (${remainingBalance} USDC)`,
+      );
     }
 
     return this.prisma.refund.update({
@@ -151,7 +181,7 @@ export class RefundsService {
       data: {
         status: RefundStatus.APPROVED,
         approvedAmount,
-        isPartial: approvedAmount < Number(enrollment.amountPaid),
+        isPartial: approvedAmount < amountPaid,
         adminNote: dto.adminNote,
       },
     });
@@ -172,8 +202,12 @@ export class RefundsService {
       throw new BadRequestException('Only APPROVED refunds can be processed');
     }
 
+    // Issue #249: Reject refunds with unverified transaction hashes
     const txStatus = await this.stellar.getTransactionStatus(dto.txHash);
-    if (txStatus && !txStatus.successful) {
+    if (txStatus === null) {
+      throw new BadRequestException('The provided refund transaction hash could not be verified (not found on-chain)');
+    }
+    if (!txStatus.successful) {
       throw new BadRequestException('The provided refund transaction did not succeed on-chain');
     }
 

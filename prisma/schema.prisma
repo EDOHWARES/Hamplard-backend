@@ -752,6 +752,7 @@ model Certificate {
   course    Course            @relation(fields: [courseId], references: [id])
   share     CertificateShare?
 
+  @@unique([studentId, courseId])
   @@index([revokedById])
   @@map("certificates")
 }
