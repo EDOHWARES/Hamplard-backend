@@ -15,6 +15,7 @@ import {
   BadRequestException,
   InternalServerErrorException,
 } from '@nestjs/common';
+import { Cron, CronExpression } from '@nestjs/schedule';
 import { createHash } from 'crypto';
 import { Prisma, DataExportJobStatus } from '@prisma/client';
 import { PrismaService } from '../../common/prisma/prisma.service';
@@ -417,6 +418,16 @@ export class DataExportService {
       throw new NotFoundException('User not found');
     }
     return user;
+  }
+
+  /** Daily housekeeping: purge expired export payloads for all users. */
+  @Cron(CronExpression.EVERY_DAY_AT_MIDNIGHT, { name: 'data-export-cleanup' })
+  async handleScheduledCleanup() {
+    try {
+      await this.cleanupExpiredExports();
+    } catch (error) {
+      this.logger.error(`Scheduled data export cleanup failed: ${error?.message}`);
+    }
   }
 
   /**

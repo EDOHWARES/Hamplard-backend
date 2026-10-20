@@ -92,6 +92,47 @@ describe('CdnService', () => {
       expect(result.visibility).toBe('private');
       expect(result.expiresAt).toBeDefined();
     });
+
+    it('signs the origin fallback URL for private assets', () => {
+      const result = service.generateCdnUrl('/uploads/kyc/doc.pdf', {
+        visibility: 'private',
+      });
+
+      expect(result.fallbackUrl).toContain('http://localhost:3000/uploads/kyc/doc.pdf?expires=');
+      expect(result.fallbackUrl).toContain('&signature=');
+    });
+  });
+
+  describe('verifySignature()', () => {
+    it('accepts a signature issued for the same path', () => {
+      const { cdnUrl } = service.generateCdnUrl('/uploads/kyc/doc.pdf', {
+        visibility: 'private',
+      });
+      const url = new URL(cdnUrl);
+
+      const validation = service.verifySignature(
+        '/uploads/kyc/doc.pdf',
+        url.searchParams.get('expires'),
+        url.searchParams.get('signature'),
+      );
+      expect(validation.valid).toBe(true);
+    });
+
+    it('rejects missing parameters and mismatched paths', () => {
+      const { cdnUrl } = service.generateCdnUrl('/uploads/kyc/doc.pdf', {
+        visibility: 'private',
+      });
+      const url = new URL(cdnUrl);
+
+      expect(service.verifySignature('/uploads/kyc/doc.pdf').valid).toBe(false);
+      expect(
+        service.verifySignature(
+          '/uploads/kyc/other.pdf',
+          url.searchParams.get('expires'),
+          url.searchParams.get('signature'),
+        ).valid,
+      ).toBe(false);
+    });
   });
 
   describe('validateSignedUrl()', () => {

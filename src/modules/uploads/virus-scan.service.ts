@@ -6,6 +6,7 @@ import {
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { PrismaService } from '../../common/prisma/prisma.service';
+import { getBooleanConfig, getNumberConfig } from '../../common/config/env.util';
 
 // eslint-disable-next-line @typescript-eslint/no-var-requires
 const NodeClam = require('clamscan');
@@ -33,7 +34,7 @@ export class VirusScanService implements OnModuleInit {
   ) {}
 
   async onModuleInit() {
-    this.isEnabled = this.config.get<boolean>('VIRUS_SCAN_ENABLED', true);
+    this.isEnabled = getBooleanConfig(this.config, 'VIRUS_SCAN_ENABLED', true);
     if (!this.isEnabled) {
       this.logger.warn('Virus scanning is disabled via configuration.');
       return;
@@ -43,8 +44,8 @@ export class VirusScanService implements OnModuleInit {
       this.clamscan = await new NodeClam().init({
         clamdscan: {
           host: this.config.get<string>('CLAMD_HOST', '127.0.0.1'),
-          port: this.config.get<number>('CLAMD_PORT', 3310),
-          timeout: this.config.get<number>('CLAMD_TIMEOUT', 5000),
+          port: getNumberConfig(this.config, 'CLAMD_PORT', 3310),
+          timeout: getNumberConfig(this.config, 'CLAMD_TIMEOUT', 5000),
         },
         preference: 'clamdscan',
       });
@@ -56,7 +57,7 @@ export class VirusScanService implements OnModuleInit {
   }
 
   async scanFile(fileId: string, buffer: Buffer): Promise<void> {
-    const maxRetries = this.config.get<number>('VIRUS_SCAN_MAX_RETRIES', 3);
+    const maxRetries = getNumberConfig(this.config, 'VIRUS_SCAN_MAX_RETRIES', 3);
 
     await this.prisma.fileScanResult.upsert({
       where: { fileId },
