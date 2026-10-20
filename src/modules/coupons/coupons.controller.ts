@@ -7,6 +7,7 @@ import { CouponsService } from './coupons.service';
 import { CreateCouponDto } from './dto/create-coupon.dto';
 import { UpdateCouponDto } from './dto/update-coupon.dto';
 import { ValidateCouponDto } from './dto/validate-coupon.dto';
+import { QueryCouponsDto } from './dto/query-coupons.dto';
 import { JwtAuthGuard } from '../../common/guards/jwt-auth.guard';
 import { RolesGuard, Roles } from '../../common/guards/roles.guard';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
@@ -39,15 +40,8 @@ export class CouponsController {
   @UseGuards(RolesGuard)
   @Roles(UserRole.ADMIN, UserRole.INSTRUCTOR)
   @ApiOperation({ summary: 'List all coupons (admin or instructor)' })
-  @ApiQuery({ name: 'page', required: false, type: Number })
-  @ApiQuery({ name: 'limit', required: false, type: Number })
-  @ApiQuery({ name: 'isActive', required: false, type: Boolean })
-  findAll(
-    @Query('page') page?: number,
-    @Query('limit') limit?: number,
-    @Query('isActive') isActive?: boolean,
-  ) {
-    return this.couponsService.findAll(page, limit, isActive);
+  findAll(@Query() query: QueryCouponsDto) {
+    return this.couponsService.findAll(query.page, query.limit, query.isActive);
   }
 
   @Get(':id')

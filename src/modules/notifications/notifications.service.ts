@@ -5,6 +5,11 @@ import * as nodemailer from 'nodemailer';
 import { PrismaService } from '../../common/prisma/prisma.service';
 import { NotificationType } from '@prisma/client';
 import { QueueService } from '../../common/queue/queue.service';
+import { UpdateNotificationPreferenceDto } from './dto/update-notification-preference.dto';
+
+type ChannelState = { email: boolean; push: boolean; inApp: boolean };
+
+const DEFAULT_CHANNEL_STATE: ChannelState = { email: true, push: true, inApp: true };
 
 @Injectable()
 export class NotificationsService {
@@ -35,12 +40,17 @@ export class NotificationsService {
     data?: Record<string, any>,
   ) {
     try {
+      // A missing preference row means "defaults" — nothing is inserted here, so
+      // concurrent notifications for a new user cannot collide on (userId, type).
+      const channelState = await this.getChannelState(userId, type);
+
+      // The notification is always stored (audit trail); types with inApp disabled
+      // are filtered out of the feed at read time.
       const notification = await this.prisma.notification.create({
         data: { userId, type, title, message, data: data ?? {} },
       });
 
-      const preferences = await this.getPreferences(userId);
-      const channelState = preferences[type] ?? { email: true, push: true, inApp: true };
+      await this.ensureDigestPreference(userId);
 
       const user = await this.prisma.user.findUnique({ where: { id: userId } });
       let emailJobId: string | undefined;
@@ -74,6 +84,9 @@ export class NotificationsService {
     const where: any = { userId };
     if (unreadOnly) where.read = false;
 
+    const hiddenTypes = await this.getInAppDisabledTypes(userId);
+    if (hiddenTypes.length) where.type = { notIn: hiddenTypes };
+
     const [notifications, total] = await this.prisma.$transaction([
       this.prisma.notification.findMany({
         where,
@@ -88,8 +101,13 @@ export class NotificationsService {
   }
 
   async getUnreadCount(userId: string) {
+    const hiddenTypes = await this.getInAppDisabledTypes(userId);
     const count = await this.prisma.notification.count({
-      where: { userId, read: false },
+      where: {
+        userId,
+        read: false,
+        ...(hiddenTypes.length ? { type: { notIn: hiddenTypes } } : {}),
+      },
     });
     return { count, unreadCount: count };
   }
@@ -193,38 +211,44 @@ export class NotificationsService {
     return tokens;
   }
 
+  /**
+   * Returns the channel settings for every notification type. Types without a
+   * stored row fall back to the defaults (all channels enabled) without writing.
+   */
   async getPreferences(userId: string) {
-    await this.ensurePreferenceDefaults(userId);
-
     const prefs = await this.prisma.notificationPreference.findMany({
       where: { userId },
-      orderBy: { type: 'asc' },
     });
+    const stored = new Map(prefs.map((pref) => [pref.type, pref]));
 
-    return prefs.reduce((acc, pref) => {
-      acc[pref.type] = { email: pref.email, push: pref.push, inApp: pref.inApp };
-      return acc;
-    }, {} as Record<string, { email: boolean; push: boolean; inApp: boolean }>);
+    return Object.values(NotificationType)
+      .sort()
+      .reduce((acc, type) => {
+        const pref = stored.get(type);
+        acc[type] = pref
+          ? { email: pref.email, push: pref.push, inApp: pref.inApp }
+          : { ...DEFAULT_CHANNEL_STATE };
+        return acc;
+      }, {} as Record<string, ChannelState>);
   }
 
-  async updatePreference(userId: string, type: NotificationType, preferences: { email?: boolean; push?: boolean; inApp?: boolean }) {
+  async updatePreference(userId: string, type: NotificationType, preferences: UpdateNotificationPreferenceDto) {
     this.assertValidNotificationType(type);
 
-    await this.ensurePreferenceDefaults(userId);
+    // True PATCH semantics: only the channels present in the body are changed.
+    const changes: Partial<ChannelState> = {};
+    if (preferences.email !== undefined) changes.email = preferences.email;
+    if (preferences.push !== undefined) changes.push = preferences.push;
+    if (preferences.inApp !== undefined) changes.inApp = preferences.inApp;
 
     const record = await this.prisma.notificationPreference.upsert({
       where: { userId_type: { userId, type } },
-      update: {
-        email: preferences.email ?? true,
-        push: preferences.push ?? true,
-        inApp: preferences.inApp ?? true,
-      },
+      update: changes,
       create: {
         userId,
         type,
-        email: preferences.email ?? true,
-        push: preferences.push ?? true,
-        inApp: preferences.inApp ?? true,
+        ...DEFAULT_CHANNEL_STATE,
+        ...changes,
       },
     });
 
@@ -236,8 +260,6 @@ export class NotificationsService {
   }
 
   async updateDigestPreference(userId: string, emailEnabled: boolean) {
-    await this.ensurePreferenceDefaults(userId);
-
     return this.prisma.notificationDigestPreference.upsert({
       where: { userId },
       update: { emailEnabled },
@@ -409,36 +431,33 @@ export class NotificationsService {
     }
   }
 
-  private async ensurePreferenceDefaults(userId: string) {
-    const availableTypes = Object.values(NotificationType);
-    const existing = await this.prisma.notificationPreference.findMany({
-      where: { userId },
+  /** Single-query lookup of one type's channels; a missing row means defaults. */
+  private async getChannelState(userId: string, type: NotificationType): Promise<ChannelState> {
+    const pref = await this.prisma.notificationPreference.findUnique({
+      where: { userId_type: { userId, type } },
+    });
+    return pref
+      ? { email: pref.email, push: pref.push, inApp: pref.inApp }
+      : { ...DEFAULT_CHANNEL_STATE };
+  }
+
+  private async getInAppDisabledTypes(userId: string): Promise<NotificationType[]> {
+    const disabled = await this.prisma.notificationPreference.findMany({
+      where: { userId, inApp: false },
       select: { type: true },
     });
-    const existingTypes = new Set(existing.map((item) => item.type));
+    return disabled.map((pref) => pref.type);
+  }
 
-    for (const type of availableTypes) {
-      if (!existingTypes.has(type as NotificationType)) {
-        await this.prisma.notificationPreference.create({
-          data: {
-            userId,
-            type: type as NotificationType,
-            email: true,
-            push: true,
-            inApp: true,
-          },
-        });
-      }
-    }
-
-    const digestPreference = await this.prisma.notificationDigestPreference.findUnique({
-      where: { userId },
+  /**
+   * Opts the user into the daily digest by default. `skipDuplicates` turns the
+   * insert into ON CONFLICT DO NOTHING, so concurrent calls never throw.
+   */
+  private async ensureDigestPreference(userId: string) {
+    await this.prisma.notificationDigestPreference.createMany({
+      data: [{ userId, emailEnabled: true }],
+      skipDuplicates: true,
     });
-    if (!digestPreference) {
-      await this.prisma.notificationDigestPreference.create({
-        data: { userId, emailEnabled: true },
-      });
-    }
   }
 
   private renderDigestTemplate(userName: string, notifications: Array<{ title: string; message: string }>) {
