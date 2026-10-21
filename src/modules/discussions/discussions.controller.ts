@@ -8,10 +8,15 @@ import {
   UseGuards,
   HttpCode,
   HttpStatus,
+  Query,
 } from '@nestjs/common';
 import { ApiTags, ApiOperation, ApiBearerAuth } from '@nestjs/swagger';
 import { CommentModerationService } from './comment-moderation.service';
+import { DiscussionsService } from './discussions.service';
 import { CreateCommentDto } from './dto/create-comment.dto';
+import { CreateQuestionDto } from './dto/create-question.dto';
+import { CreateAnswerDto } from './dto/create-answer.dto';
+import { ThreadQueryDto } from './dto/thread-query.dto';
 import { ReviewCommentDto } from './dto/review-comment.dto';
 import { JwtAuthGuard } from '../../common/guards/jwt-auth.guard';
 import { OptionalJwtAuthGuard } from '../../common/guards/optional-jwt-auth.guard';
@@ -22,7 +27,67 @@ import { UserRole } from '@prisma/client';
 @ApiTags('discussions')
 @Controller('discussions')
 export class DiscussionsController {
-  constructor(private readonly commentModerationService: CommentModerationService) {}
+  constructor(
+    private readonly commentModerationService: CommentModerationService,
+    private readonly discussionsService: DiscussionsService,
+  ) {}
+
+  // ----------------------------------------------------------
+  // LESSON Q&A THREADS
+  // ----------------------------------------------------------
+
+  @Post('lessons/:lessonId/questions')
+  @UseGuards(JwtAuthGuard)
+  @ApiBearerAuth()
+  @HttpCode(HttpStatus.CREATED)
+  @ApiOperation({ summary: 'Ask a question on a lesson (enrolled students, instructor or admin)' })
+  createQuestion(
+    @Param('lessonId') lessonId: string,
+    @CurrentUser() user: { id: string; role: UserRole },
+    @Body() dto: CreateQuestionDto,
+  ) {
+    return this.discussionsService.createQuestion(lessonId, user.id, user.role, dto);
+  }
+
+  @Get('lessons/:lessonId/questions')
+  @ApiOperation({ summary: 'List question threads for a lesson (paginated)' })
+  listThreads(@Param('lessonId') lessonId: string, @Query() query: ThreadQueryDto) {
+    return this.discussionsService.listThreads(lessonId, query.page, query.limit);
+  }
+
+  @Get('questions/:questionId')
+  @ApiOperation({ summary: 'Get a question with its answer thread (paginated answers)' })
+  getThread(@Param('questionId') questionId: string, @Query() query: ThreadQueryDto) {
+    return this.discussionsService.getThread(questionId, query.page, query.limit);
+  }
+
+  @Post('questions/:questionId/answers')
+  @UseGuards(JwtAuthGuard)
+  @ApiBearerAuth()
+  @HttpCode(HttpStatus.CREATED)
+  @ApiOperation({ summary: 'Answer a question (enrolled students, instructor or admin)' })
+  createAnswer(
+    @Param('questionId') questionId: string,
+    @CurrentUser() user: { id: string; role: UserRole },
+    @Body() dto: CreateAnswerDto,
+  ) {
+    return this.discussionsService.createAnswer(questionId, user.id, user.role, dto);
+  }
+
+  @Patch('answers/:answerId/best')
+  @UseGuards(JwtAuthGuard)
+  @ApiBearerAuth()
+  @ApiOperation({ summary: 'Mark an answer as the best answer (course instructor or admin)' })
+  markBestAnswer(
+    @Param('answerId') answerId: string,
+    @CurrentUser() user: { id: string; role: UserRole },
+  ) {
+    return this.discussionsService.markBestAnswer(answerId, user.id, user.role);
+  }
+
+  // ----------------------------------------------------------
+  // COMMENTS & MODERATION
+  // ----------------------------------------------------------
 
   @Post('comments')
   @UseGuards(JwtAuthGuard)

@@ -10,6 +10,7 @@ import {
 } from "class-validator";
 import { CourseBackupStatus } from "@prisma/client";
 import { RestoreCourseBackupDto } from "./restore-course.dto";
+import { ToOptionalBool } from "../../../common/pipes/parse-optional-bool";
 
 export class RequestCourseBackupDto {
   @ApiPropertyOptional({ description: "ID of the course to backup" })
@@ -40,7 +41,7 @@ export class QueryCourseBackupsDto {
 
   @ApiPropertyOptional({ description: "Filter by automatic/scheduled backups" })
   @IsOptional()
-  @Type(() => Boolean)
+  @ToOptionalBool()
   @IsBoolean()
   isAutomatic?: boolean;
 }

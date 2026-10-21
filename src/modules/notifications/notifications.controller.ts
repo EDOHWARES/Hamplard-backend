@@ -4,6 +4,8 @@ import { NotificationType } from '@prisma/client';
 import { NotificationsService } from './notifications.service';
 import { JwtAuthGuard } from '../../common/guards/jwt-auth.guard';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
+import { QueryNotificationsDto } from './dto/query-notifications.dto';
+import { UpdateNotificationPreferenceDto } from './dto/update-notification-preference.dto';
 
 @ApiTags('notifications')
 @ApiBearerAuth()
@@ -14,13 +16,8 @@ export class NotificationsController {
 
   @Get()
   @ApiOperation({ summary: 'Get notifications for the authenticated user' })
-  findAll(
-    @CurrentUser('id') userId: string,
-    @Query('unreadOnly') unreadOnly?: boolean,
-    @Query('page') page?: number,
-    @Query('limit') limit?: number,
-  ) {
-    return this.notificationsService.findForUser(userId, unreadOnly, page, limit);
+  findAll(@CurrentUser('id') userId: string, @Query() query: QueryNotificationsDto) {
+    return this.notificationsService.findForUser(userId, query.unreadOnly, query.page, query.limit);
   }
 
   @Get('unread-count')
@@ -68,7 +65,7 @@ export class NotificationsController {
   updatePreference(
     @CurrentUser('id') userId: string,
     @Param('type') type: NotificationType,
-    @Body() preferences: { email?: boolean; push?: boolean; inApp?: boolean },
+    @Body() preferences: UpdateNotificationPreferenceDto,
   ) {
     return this.notificationsService.updatePreference(userId, type, preferences);
   }
