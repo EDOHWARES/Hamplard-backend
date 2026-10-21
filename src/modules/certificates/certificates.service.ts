@@ -105,16 +105,25 @@ export class CertificatesService {
     const certificateId = `CERT-${uuidv4().replace(/-/g, '').slice(0, 12).toUpperCase()}`;
 
     // Create DB record
-    const certificate = await this.prisma.certificate.create({
-      data: {
-        id:                certificateId,
-        studentId,
-        courseId,
-        courseTitle:       enrollment.course.title,
-        instructorAddress: enrollment.course.instructorAddress,
-      },
-      include: { student: true, course: true },
-    });
+    // Issue #248: Catch P2002 (unique constraint violation) for concurrent issuance
+    let certificate;
+    try {
+      certificate = await this.prisma.certificate.create({
+        data: {
+          id:                certificateId,
+          studentId,
+          courseId,
+          courseTitle:       enrollment.course.title,
+          instructorAddress: enrollment.course.instructorAddress,
+        },
+        include: { student: true, course: true },
+      });
+    } catch (error) {
+      if (error.code === 'P2002' && error.meta?.target?.includes('studentId_courseId')) {
+        throw new ConflictException('Certificate already issued for this enrollment');
+      }
+      throw error;
+    }
 
     // Generate PDF certificate using the course's category for template lookup
     const renderData: CertificateRenderData = {
@@ -236,26 +245,51 @@ export class CertificatesService {
 
   /**
    * Public verification endpoint — checks both DB and on-chain state.
-   * Returns the certificate details if valid, or an error if revoked/not found.
+   * Issue #247: Returns tri-state result (valid/invalid/unverifiable/pending)
+   * instead of conflating RPC errors with revocation.
    */
   async verify(certificateId: string) {
     const cert = await this.findPublicById(certificateId);
 
+    // Check if certificate is revoked
     if (cert.isRevoked) {
-      return { valid: false, reason: 'Certificate has been revoked', certificate: null };
-    }
-
-    // Cross-check with on-chain state
-    const onChainValid = await this.stellar.verifyCertificateOnChain(certificateId);
-    if (!onChainValid) {
       return {
-        valid: false,
-        reason: 'Certificate not found or revoked on-chain',
+        status: 'INVALID',
+        reason: 'revoked',
         certificate: null,
       };
     }
 
-    return { valid: true, certificate: cert };
+    // Check if certificate is pending (not yet issued on-chain)
+    if (!cert.txHash) {
+      return {
+        status: 'PENDING',
+        reason: 'not_issued_on_chain_yet',
+        certificate: null,
+      };
+    }
+
+    // Cross-check with on-chain state
+    const onChainResult = await this.stellar.verifyCertificateOnChain(certificateId);
+
+    if (onChainResult.error) {
+      return {
+        status: 'UNVERIFIABLE',
+        reason: 'rpc_error',
+        details: onChainResult.error.message,
+        certificate: null,
+      };
+    }
+
+    if (!onChainResult.valid) {
+      return {
+        status: 'INVALID',
+        reason: 'not_found_on_chain',
+        certificate: null,
+      };
+    }
+
+    return { status: 'VALID', certificate: cert };
   }
 
   async revoke(certificateId: string, adminId: string, reason?: string) {
