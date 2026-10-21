@@ -4,6 +4,7 @@ import { HealthController } from './health.controller';
 import { PrismaService } from '../../common/prisma/prisma.service';
 import { EventsService } from '../events/events.service';
 import type { CheckpointStatus } from '../events/events.service';
+import { VirusScanService } from '../uploads/virus-scan.service';
 
 /**
  * Exercises the real health routes end-to-end: the controller is resolved from
@@ -28,6 +29,9 @@ describe('HealthController (Issue #80 — checkpoint via health endpoint)', () =
   };
 
   const mockEvents = { getCheckpointStatus: jest.fn() };
+  const mockVirusScan = {
+    getScannerStatus: jest.fn().mockReturnValue({ enabled: true, available: true }),
+  };
   // PrismaHealthIndicator.pingDb tries $runCommandRaw first, then falls back to
   // $queryRawUnsafe('SELECT 1') for SQL providers.
   const mockPrisma = {
@@ -44,6 +48,7 @@ describe('HealthController (Issue #80 — checkpoint via health endpoint)', () =
       providers: [
         { provide: PrismaService, useValue: mockPrisma },
         { provide: EventsService, useValue: mockEvents },
+        { provide: VirusScanService, useValue: mockVirusScan },
       ],
     }).compile();
 
@@ -51,6 +56,7 @@ describe('HealthController (Issue #80 — checkpoint via health endpoint)', () =
     jest.clearAllMocks();
     mockPrisma.$runCommandRaw.mockRejectedValue(new Error('Use the mongodb provider'));
     mockPrisma.$queryRawUnsafe.mockResolvedValue([{ result: 1 }]);
+    mockVirusScan.getScannerStatus.mockReturnValue({ enabled: true, available: true });
   });
 
   it('GET /health/checkpoint returns the current ledger checkpoint payload', async () => {
@@ -76,6 +82,25 @@ describe('HealthController (Issue #80 — checkpoint via health endpoint)', () =
         persistedLedger: 5123,
       }),
     );
+    expect(result.info?.virus_scanner).toEqual({
+      status: 'up',
+      enabled: true,
+      available: true,
+    });
+  });
+
+  it('GET /health reports an enabled but unavailable virus scanner as unhealthy', async () => {
+    mockEvents.getCheckpointStatus.mockResolvedValue(healthyStatus);
+    mockVirusScan.getScannerStatus.mockReturnValue({ enabled: true, available: false });
+
+    const result = await controller.check();
+
+    expect(result.status).toBe('error');
+    expect(result.error?.virus_scanner).toEqual({
+      status: 'down',
+      enabled: true,
+      available: false,
+    });
   });
 
   it('GET /health surfaces a degraded checkpoint without failing the overall check', async () => {

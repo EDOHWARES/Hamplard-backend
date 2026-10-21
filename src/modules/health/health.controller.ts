@@ -2,12 +2,14 @@ import { Controller, Get } from '@nestjs/common';
 import {
   HealthCheck,
   HealthCheckService,
+  HealthCheckError,
   HealthIndicatorResult,
   PrismaHealthIndicator,
 } from '@nestjs/terminus';
 import { ApiTags, ApiOperation } from '@nestjs/swagger';
 import { PrismaService } from '../../common/prisma/prisma.service';
 import { EventsService } from '../events/events.service';
+import { VirusScanService } from '../uploads/virus-scan.service';
 
 @ApiTags('health')
 @Controller('health')
@@ -17,6 +19,7 @@ export class HealthController {
     private readonly prismaHealth: PrismaHealthIndicator,
     private readonly prisma: PrismaService,
     private readonly events: EventsService,
+    private readonly virusScan: VirusScanService,
   ) {}
 
   @Get()
@@ -26,6 +29,7 @@ export class HealthController {
     return this.health.check([
       () => this.prismaHealth.pingCheck('database', this.prisma),
       () => this.eventPollerCheckpointIndicator(),
+      () => this.virusScannerIndicator(),
     ]);
   }
 
@@ -58,5 +62,22 @@ export class HealthController {
         lastWriteError: status.lastWriteError,
       },
     };
+  }
+
+  private async virusScannerIndicator(): Promise<HealthIndicatorResult> {
+    const scanner = this.virusScan.getScannerStatus();
+    const result: HealthIndicatorResult = {
+      virus_scanner: {
+        status: scanner.enabled && !scanner.available ? 'down' : 'up',
+        enabled: scanner.enabled,
+        available: scanner.available,
+      },
+    };
+
+    if (scanner.enabled && !scanner.available) {
+      throw new HealthCheckError('Virus scanner is unavailable', result);
+    }
+
+    return result;
   }
 }

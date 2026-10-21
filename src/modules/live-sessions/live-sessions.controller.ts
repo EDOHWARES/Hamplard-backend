@@ -14,6 +14,7 @@ import { LiveSessionsService } from './live-sessions.service';
 import { CreateSessionDto } from './dto/create-session.dto';
 import { UpdateSessionDto } from './dto/update-session.dto';
 import { JwtAuthGuard } from '../../common/guards/jwt-auth.guard';
+import { OptionalJwtAuthGuard } from '../../common/guards/optional-jwt-auth.guard';
 
 @Controller('live-sessions')
 export class LiveSessionsController {
@@ -54,15 +55,22 @@ export class LiveSessionsController {
   }
 
   @Get('upcoming')
+  @UseGuards(OptionalJwtAuthGuard)
   async getUpcomingSessions(
+    @Req() req: any,
     @Query('courseId') courseId?: string,
     @Query('instructorAddress') instructorAddress?: string,
   ) {
-    return this.liveSessionsService.getUpcomingSessions(courseId, instructorAddress);
+    return this.liveSessionsService.getUpcomingSessions(
+      courseId,
+      instructorAddress,
+      req.user,
+    );
   }
 
   @Get(':id')
-  async getSessionById(@Param('id') id: string) {
-    return this.liveSessionsService.getSessionById(id);
+  @UseGuards(OptionalJwtAuthGuard)
+  async getSessionById(@Param('id') id: string, @Req() req: any) {
+    return this.liveSessionsService.getSessionById(id, req.user);
   }
 }

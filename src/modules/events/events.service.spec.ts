@@ -5,11 +5,19 @@ import { NotificationsService } from '../notifications/notifications.service';
 import { CoursesService } from '../courses/courses.service';
 import { ConfigService } from '@nestjs/config';
 import { SchedulerRegistry } from '@nestjs/schedule';
+import { Address, Keypair, nativeToScVal, xdr } from '@stellar/stellar-sdk';
 import {
   EventsService,
   EVENT_POLLER_CHECKPOINT_KEY,
   EVENT_POLLER_INTERVAL_NAME,
 } from './events.service';
+
+jest.mock('../notifications/notifications.service', () => ({
+  NotificationsService: class NotificationsService {},
+}));
+jest.mock('../courses/courses.service', () => ({
+  CoursesService: class CoursesService {},
+}));
 
 /**
  * SchedulerRegistry stand-in that records registered intervals and clears
@@ -522,5 +530,135 @@ describe('EventsService — course status sync via CoursesService (Issue #232)',
     mockCourses.approveCourse.mockRejectedValueOnce(new Error('db down'));
 
     await expect(emit('course_approved', 'C-1')).resolves.toBeUndefined();
+  });
+});
+
+describe('EventsService — Soroban ScVal event decoding (Issue #226)', () => {
+  let service: EventsService;
+  const rows: any[] = [];
+  const mockPrisma = {
+    chainEvent: {
+      create: jest.fn(),
+      update: jest.fn().mockResolvedValue({}),
+    },
+  };
+  const mockCourses = {};
+  const mockNotifications = { notifyUser: jest.fn() };
+  const studentAddress = Keypair.random().publicKey();
+  const largeAmount = 9_007_199_254_740_993n;
+  const tuple = (...values: xdr.ScVal[]) => xdr.ScVal.scvVec(values);
+
+  const fixtures = [
+    {
+      eventName: 'course_registered',
+      handler: 'handleCourseRegistered',
+      value: xdr.ScVal.scvString('COURSE-1'),
+      expected: 'COURSE-1',
+    },
+    {
+      eventName: 'course_approved',
+      handler: 'handleCourseApproved',
+      value: xdr.ScVal.scvString('COURSE-1'),
+      expected: 'COURSE-1',
+    },
+    {
+      eventName: 'course_paused',
+      handler: 'handleCoursePaused',
+      value: xdr.ScVal.scvString('COURSE-1'),
+      expected: 'COURSE-1',
+    },
+    {
+      eventName: 'course_archived',
+      handler: 'handleCourseArchived',
+      value: xdr.ScVal.scvString('COURSE-1'),
+      expected: 'COURSE-1',
+    },
+    {
+      eventName: 'student_enrolled',
+      handler: 'handleStudentEnrolled',
+      value: tuple(
+        xdr.ScVal.scvString('COURSE-1'),
+        new Address(studentAddress).toScVal(),
+        nativeToScVal(largeAmount, { type: 'i128' }),
+      ),
+      expected: ['COURSE-1', studentAddress, largeAmount.toString()],
+    },
+    {
+      eventName: 'course_completed',
+      handler: 'handleCourseCompleted',
+      value: tuple(
+        xdr.ScVal.scvString('COURSE-1'),
+        new Address(studentAddress).toScVal(),
+      ),
+      expected: ['COURSE-1', studentAddress],
+    },
+    {
+      eventName: 'certificate_issued',
+      handler: 'handleCertificateIssued',
+      value: tuple(
+        xdr.ScVal.scvString('CERT-1'),
+        new Address(studentAddress).toScVal(),
+        xdr.ScVal.scvString('COURSE-1'),
+      ),
+      expected: ['CERT-1', studentAddress, 'COURSE-1'],
+    },
+    {
+      eventName: 'certificate_revoked',
+      handler: 'handleCertificateRevoked',
+      value: xdr.ScVal.scvString('CERT-1'),
+      expected: 'CERT-1',
+    },
+  ];
+
+  beforeEach(async () => {
+    rows.length = 0;
+
+    const module: TestingModule = await Test.createTestingModule({
+      providers: [
+        EventsService,
+        { provide: PrismaService, useValue: mockPrisma },
+        { provide: StellarService, useValue: {} },
+        { provide: NotificationsService, useValue: mockNotifications },
+        { provide: CoursesService, useValue: mockCourses },
+        { provide: ConfigService, useValue: { get: jest.fn() } },
+        { provide: SchedulerRegistry, useValue: buildMockScheduler() },
+      ],
+    }).compile();
+
+    service = module.get(EventsService);
+    jest.clearAllMocks();
+    mockPrisma.chainEvent.create.mockImplementation(({ data }) => {
+      rows.push(data);
+      return Promise.resolve({ id: `row-${rows.length}` });
+    });
+  });
+
+  it.each(fixtures)('decodes and dispatches $eventName', async (fixture) => {
+    const handler = jest
+      .spyOn(service as any, fixture.handler)
+      .mockResolvedValue(undefined);
+    const event = {
+      id: `event-${fixture.eventName}`,
+      ledger: 101,
+      pagingToken: '101-0',
+      txHash: 'tx-1',
+      topic: [xdr.ScVal.scvSymbol(fixture.eventName)],
+      value: fixture.value,
+    };
+
+    await (service as any).processEvent(event);
+
+    expect(handler).toHaveBeenCalledWith(fixture.expected);
+    expect(rows[0]).toEqual(
+      expect.objectContaining({
+        eventName: fixture.eventName,
+        payload: fixture.expected,
+      }),
+    );
+    expect(mockPrisma.chainEvent.update).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({ processed: true }),
+      }),
+    );
   });
 });

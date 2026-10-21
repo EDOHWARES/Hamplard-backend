@@ -1,4 +1,4 @@
-import { BadRequestException } from '@nestjs/common';
+import { BadRequestException, ServiceUnavailableException } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { Test, TestingModule } from '@nestjs/testing';
 import { VirusScanService } from './virus-scan.service';
@@ -139,12 +139,42 @@ describe('VirusScanService', () => {
     mockScanBuffer.mockRejectedValue(new Error('timeout'));
 
     await expect(service.scanFile('file-4', Buffer.from('data'))).rejects.toThrow(
-      BadRequestException,
+      ServiceUnavailableException,
     );
 
     const status = await service.getScanStatus('file-4');
     expect(status?.status).toBe('error');
     expect(status?.attempts).toBe(2);
+  });
+
+  it('rejects uploads while ClamAV is unavailable and reconnects on a later scan', async () => {
+    const failedInit = jest.fn().mockRejectedValue(new Error('clamd unavailable'));
+    NodeClam.mockImplementationOnce(() => ({ init: failedInit }));
+    NodeClam.mockImplementationOnce(() => ({ init: failedInit }));
+
+    const unavailableService = new VirusScanService(
+      { get: mockConfigGet } as any,
+      mockPrisma,
+    );
+    await unavailableService.onModuleInit();
+
+    expect(unavailableService.getScannerStatus()).toEqual({
+      enabled: true,
+      available: false,
+    });
+    await expect(
+      unavailableService.scanFile('file-unavailable', Buffer.from('data')),
+    ).rejects.toThrow(ServiceUnavailableException);
+    expect((await unavailableService.getScanStatus('file-unavailable'))?.status).toBe('error');
+
+    mockScanBuffer.mockResolvedValueOnce({ isInfected: false, viruses: [] });
+    await unavailableService.scanFile('file-reconnected', Buffer.from('data'));
+
+    expect(unavailableService.getScannerStatus()).toEqual({
+      enabled: true,
+      available: true,
+    });
+    expect((await unavailableService.getScanStatus('file-reconnected'))?.status).toBe('clean');
   });
 
   it('succeeds if timeout happens but subsequent retry passes', async () => {

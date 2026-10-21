@@ -8,7 +8,7 @@ import {
 import { PrismaService } from '../../common/prisma/prisma.service';
 import { CreateSessionDto } from './dto/create-session.dto';
 import { UpdateSessionDto } from './dto/update-session.dto';
-import { LiveSessionStatus } from '@prisma/client';
+import { EnrollmentStatus, LiveSessionStatus, UserRole } from '@prisma/client';
 
 @Injectable()
 export class LiveSessionsService {
@@ -220,7 +220,7 @@ export class LiveSessionsService {
   /**
    * List upcoming sessions for a course or instructor.
    */
-  async getUpcomingSessions(courseId?: string, instructorAddress?: string) {
+  async getUpcomingSessions(courseId?: string, instructorAddress?: string, user?: any) {
     const where: any = {
       status: { in: [LiveSessionStatus.SCHEDULED, LiveSessionStatus.RESCHEDULED] },
       scheduledAt: { gte: new Date() },
@@ -229,20 +229,93 @@ export class LiveSessionsService {
     if (courseId) where.courseId = courseId;
     if (instructorAddress) where.instructorAddress = instructorAddress;
 
-    return this.prisma.liveSession.findMany({
+    const sessions = await this.prisma.liveSession.findMany({
       where,
-      include: { course: { select: { title: true, thumbnailUrl: true } } },
+      include: {
+        course: {
+          select: {
+            id: true,
+            title: true,
+            thumbnailUrl: true,
+            instructor: { select: { id: true } },
+          },
+        },
+      },
       orderBy: { scheduledAt: 'asc' },
     });
+
+    return this.shapeSessionResponses(sessions, user);
   }
 
-  async getSessionById(sessionId: string) {
+  async getSessionById(sessionId: string, user?: any) {
     const session = await this.prisma.liveSession.findUnique({
       where: { id: sessionId },
-      include: { course: true },
+      include: {
+        course: {
+          select: {
+            id: true,
+            title: true,
+            thumbnailUrl: true,
+            instructor: { select: { id: true } },
+          },
+        },
+      },
     });
     if (!session) throw new NotFoundException('Live session not found');
-    return session;
+    return (await this.shapeSessionResponses([session], user))[0];
+  }
+
+  private async shapeSessionResponses(sessions: any[], user?: any) {
+    const isAdmin = user?.role === UserRole.ADMIN;
+    const instructorSessionIds = new Set<string>();
+
+    for (const session of sessions) {
+      const address = user?.stellarAddress ?? user?.address;
+      if (
+        user?.id &&
+        (session.course?.instructor?.id === user.id ||
+          (address && session.instructorAddress === address))
+      ) {
+        instructorSessionIds.add(session.id);
+      }
+    }
+
+    const courseIdsNeedingEnrollment = [
+      ...new Set(
+        sessions
+          .filter((session) => !isAdmin && !instructorSessionIds.has(session.id))
+          .map((session) => session.courseId),
+      ),
+    ];
+    const enrolledCourseIds = new Set<string>();
+
+    if (user?.id && courseIdsNeedingEnrollment.length > 0) {
+      const enrollments = await this.prisma.enrollment.findMany({
+        where: {
+          studentId: user.id,
+          courseId: { in: courseIdsNeedingEnrollment },
+          status: { not: EnrollmentStatus.REFUNDED },
+        },
+        select: { courseId: true },
+      });
+      for (const enrollment of enrollments) enrolledCourseIds.add(enrollment.courseId);
+    }
+
+    return sessions.map((session) => {
+      const canViewMeetingUrl =
+        isAdmin ||
+        instructorSessionIds.has(session.id) ||
+        enrolledCourseIds.has(session.courseId);
+      const { meetingUrl, course, ...sessionSummary } = session;
+
+      return {
+        ...sessionSummary,
+        ...(canViewMeetingUrl ? { meetingUrl } : {}),
+        course: course
+          ? { id: course.id, title: course.title, thumbnailUrl: course.thumbnailUrl }
+          : null,
+      };
+    });
   }
 
   /**
