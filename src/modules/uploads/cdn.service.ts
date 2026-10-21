@@ -62,11 +62,14 @@ export class CdnService {
     this.cdnBaseUrl = this.stripTrailingSlash(
       this.config.get<string>('CDN_BASE_URL', 'https://cdn.hamplard.com'),
     );
+    // Stored files are served by FilesController under the API prefix
+    // (e.g. http://localhost:3000/api/v1/uploads/...).
+    const defaultOrigin =
+      this.stripTrailingSlash(this.config.get<string>('APP_BASE_URL', 'http://localhost:3000')) +
+      '/' +
+      this.config.get<string>('API_PREFIX', 'api/v1').replace(/^\/+|\/+$/g, '');
     this.originBaseUrl = this.stripTrailingSlash(
-      this.config.get<string>(
-        'CDN_ORIGIN_BASE_URL',
-        this.config.get<string>('APP_BASE_URL', 'http://localhost:3000'),
-      ),
+      this.config.get<string>('CDN_ORIGIN_BASE_URL', defaultOrigin),
     );
     this.signingSecret = this.config.get<string>(
       'CDN_SIGNING_SECRET',
@@ -95,14 +98,14 @@ export class CdnService {
         options.expiresInSeconds ?? this.defaultSignedTtl;
       const expiresAt = Math.floor(Date.now() / 1000) + expiresIn;
       const signature = this.sign(normalizedPath, expiresAt);
-      const cdnUrl =
-        `${this.cdnBaseUrl}${normalizedPath}` +
-        `?expires=${expiresAt}&signature=${signature}`;
+      const query = `?expires=${expiresAt}&signature=${signature}`;
+      const cdnUrl = `${this.cdnBaseUrl}${normalizedPath}${query}`;
 
       return {
         originUrl: normalizedPath,
         cdnUrl,
-        fallbackUrl,
+        // The origin also requires the signature for private assets.
+        fallbackUrl: `${fallbackUrl}${query}`,
         visibility,
         expiresAt: new Date(expiresAt * 1000).toISOString(),
       };
@@ -127,9 +130,21 @@ export class CdnService {
       return { valid: false, expired: false, reason: 'Invalid URL' };
     }
 
-    const expiresRaw = parsed.searchParams.get('expires');
-    const signature = parsed.searchParams.get('signature');
+    return this.verifySignature(
+      parsed.pathname,
+      parsed.searchParams.get('expires'),
+      parsed.searchParams.get('signature'),
+    );
+  }
 
+  /**
+   * Verify an expiry/signature pair for an asset path (e.g. /uploads/kyc/x.pdf).
+   */
+  verifySignature(
+    assetPath: string,
+    expiresRaw?: string | null,
+    signature?: string | null,
+  ): SignedUrlValidation {
     if (!expiresRaw || !signature) {
       return {
         valid: false,
@@ -143,7 +158,7 @@ export class CdnService {
       return { valid: false, expired: false, reason: 'Invalid expires value' };
     }
 
-    const path = parsed.pathname;
+    const path = assetPath;
     const expiresAt = new Date(expiresAtSec * 1000);
     const nowSec = Math.floor(Date.now() / 1000);
 
@@ -340,7 +355,7 @@ export class CdnService {
   private toOriginUrl(cdnUrl: string): string {
     try {
       const parsed = new URL(cdnUrl);
-      return `${this.originBaseUrl}${parsed.pathname}`;
+      return `${this.originBaseUrl}${parsed.pathname}${parsed.search}`;
     } catch {
       return `${this.originBaseUrl}${this.normalizePath(cdnUrl)}`;
     }

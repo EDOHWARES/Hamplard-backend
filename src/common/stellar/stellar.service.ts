@@ -142,20 +142,32 @@ export class StellarService implements OnModuleInit {
   }
 
   /** Verify a certificate on-chain */
-  async verifyCertificateOnChain(certificateId: string): Promise<boolean> {
+  async verifyCertificateOnChain(
+    certificateId: string,
+  ): Promise<{ valid: boolean; error?: { code: string; message: string } }> {
     try {
       const { nativeToScVal } = await import('@stellar/stellar-sdk');
       const result = await this.simulateCall('verify_certificate', [
         nativeToScVal(certificateId, { type: 'string' }),
       ]);
-      return Boolean(result);
-    } catch { return false; }
+      return { valid: Boolean(result) };
+    } catch (error) {
+      this.logger.error(`verifyCertificateOnChain(${certificateId}) failed: ${error.message}`);
+      return {
+        valid: false,
+        error: {
+          code: error.code || 'UNKNOWN_ERROR',
+          message: error.message,
+        },
+      };
+    }
   }
 
   /**
    * Look up a submitted transaction by hash and report whether it succeeded.
-   * Used to confirm an admin-submitted refund (or other) transaction actually
-   * landed on-chain before the backend marks it as processed.
+   * Issue #249: Differentiates RPC errors from invalid hashes.
+   * Returns null only for NOT_FOUND (hash not found).
+   * Throws HttpException(503) for RPC errors (network down, timeouts).
    */
   async getTransactionStatus(
     txHash: string,
@@ -167,8 +179,15 @@ export class StellarService implements OnModuleInit {
         successful: result.status === SorobanRpc.Api.GetTransactionStatus.SUCCESS,
       };
     } catch (error) {
-      this.logger.error(`getTransactionStatus(${txHash}) failed`, error.message);
-      return null;
+      // NOT_FOUND means the hash doesn't exist in the ledger
+      if (error.message?.includes('NOT_FOUND')) {
+        this.logger.warn(`Transaction ${txHash} not found on-chain`);
+        return null;
+      }
+      
+      // Any other error is treated as an RPC/network failure (throw 503)
+      this.logger.error(`getTransactionStatus(${txHash}) RPC error: ${error.message}`);
+      throw error;
     }
   }
 

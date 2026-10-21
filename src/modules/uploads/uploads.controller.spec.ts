@@ -95,7 +95,13 @@ describe('UploadsController', () => {
 
       const res = await controller.uploadCourseAsset({ user: instructorUser }, fakeFile, 'course-1');
       expect(res).toEqual({ url: 'https://cdn.example.com/asset.png' });
-      expect(mockUploadsService.saveFile).toHaveBeenCalledWith(fakeFile, 'courses/course-1');
+      expect(mockUploadsService.validateFile).toHaveBeenCalledWith(fakeFile, 'document');
+      expect(mockUploadsService.saveFile).toHaveBeenCalledWith(
+        fakeFile,
+        'courses/course-1',
+        'public',
+        'document',
+      );
     });
 
     it('propagates validation errors from validateFile', async () => {

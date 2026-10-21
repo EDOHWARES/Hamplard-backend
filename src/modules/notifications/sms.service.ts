@@ -50,17 +50,23 @@ interface DeliveryCallbackPayload {
 @Injectable()
 export class SmsService {
   private readonly logger = new Logger(SmsService.name);
-  private readonly gateway: any;
+  private readonly gateway: any = null;
 
   constructor(
     private readonly prisma: PrismaService,
     private readonly config: ConfigService,
   ) {
-    const africastalking = require('africastalking')({
-      apiKey: this.config.get('AFRICASTALKING_API_KEY'),
-      username: this.config.get('AFRICASTALKING_USERNAME', 'sandbox'),
-    });
-    this.gateway = africastalking.SMS;
+    const apiKey = this.config.get<string>('AFRICASTALKING_API_KEY');
+    const username = this.config.get<string>('AFRICASTALKING_USERNAME', 'sandbox');
+
+    if (!apiKey) {
+      this.logger.warn(
+        "Africa's Talking credentials not configured. SMS sending will be disabled.",
+      );
+    } else {
+      const africastalking = require('africastalking')({ apiKey, username });
+      this.gateway = africastalking.SMS;
+    }
   }
 
   /** Validates and normalizes a phone number against country-specific formats, returning it in E.164 form. */
@@ -111,6 +117,14 @@ export class SmsService {
         status: SmsStatus.PENDING,
       },
     });
+
+    if (!this.gateway) {
+      this.logger.warn(`SMS gateway not configured — message ${smsMessage.id} not sent`);
+      return this.prisma.smsMessage.update({
+        where: { id: smsMessage.id },
+        data: { status: SmsStatus.FAILED, failureReason: 'SMS gateway not configured' },
+      });
+    }
 
     try {
       const response = await this.gateway.send({

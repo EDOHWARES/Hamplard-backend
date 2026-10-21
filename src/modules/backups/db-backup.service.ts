@@ -14,6 +14,7 @@ import {
   S3Client,
 } from '@aws-sdk/client-s3';
 import { DB_BACKUP_S3_CLIENT } from './backups.constants';
+import { getBooleanConfig } from '../../common/config/env.util';
 
 export type BackupRunState = 'SUCCESS' | 'FAILED' | 'SKIPPED';
 
@@ -333,11 +334,7 @@ export class DbBackupService {
   }
 
   private isBackupEnabled(): boolean {
-    return (
-      String(this.config.get<string | boolean>('BACKUP_ENABLED', false))
-        .trim()
-        .toLowerCase() === 'true'
-    );
+    return getBooleanConfig(this.config, 'BACKUP_ENABLED', false);
   }
 
   private recordSkippedRun(startedAt: Date, message: string): BackupRunStatus {

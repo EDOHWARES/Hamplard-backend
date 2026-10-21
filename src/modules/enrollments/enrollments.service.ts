@@ -7,7 +7,7 @@ import { NotificationsService } from '../notifications/notifications.service';
 import { InvoicesService } from '../invoices/invoices.service';
 import { ReferralsService } from '../referrals/referrals.service';
 import { NotificationType, CourseStatus, Prisma } from '@prisma/client';
-import { FraudDetectionService } from './fraud-detection.service';
+import { FraudDetectionService, FraudCheckResult } from './fraud-detection.service';
 import { DripScheduleService } from '../lessons/drip-schedule.service';
 import { StellarService } from '../../common/stellar/stellar.service';
 
@@ -50,38 +50,13 @@ export class EnrollmentsService {
       where: { id: courseId },
     });
     if (!course) throw new NotFoundException(`Course ${courseId} not found`);
-    if (course.status !== CourseStatus.ACTIVE) {
-      throw new ForbiddenException(
-        `Cannot enroll in a ${course.status} course. Only ACTIVE courses accept enrollments.`,
-      );
-    }
+    this.assertCourseActive(course);
 
     // ------------------------------------------------------------------
-    // PRE-CHECK #0B: Verify enrollment transaction on-chain (issue #239)
+    // PRE-CHECK #0B/#0C: Verify the tx on-chain and that it is unused
+    // (issues #239 & #240)
     // ------------------------------------------------------------------
-    const txStatus = await this.stellar.getTransactionStatus(txHash);
-    if (!txStatus) {
-      throw new BadRequestException(
-        `Transaction ${txHash} not found on-chain. Please verify the transaction hash.`,
-      );
-    }
-    if (!txStatus.successful) {
-      throw new BadRequestException(
-        `Transaction ${txHash} did not succeed on-chain (status: ${txStatus.status}).`,
-      );
-    }
-
-    // ------------------------------------------------------------------
-    // PRE-CHECK #0C: Enforce unique txHash (issue #240)
-    // ------------------------------------------------------------------
-    const existingPayment = await this.prisma.payment.findUnique({
-      where: { txHash },
-    });
-    if (existingPayment) {
-      throw new ConflictException(
-        `Payment ${txHash} has already been used. One transaction maps to one purchase.`,
-      );
-    }
+    await this.verifyPaymentTransaction(txHash);
 
     // ------------------------------------------------------------------
     // PRE-CHECK #1: Ensure student is not already enrolled
@@ -92,49 +67,9 @@ export class EnrollmentsService {
     if (existing) throw new ConflictException('Already enrolled in this course');
 
     // ------------------------------------------------------------------
-    // PRE-CHECK #2: Enforce course prerequisites (issue #24)
+    // PRE-CHECK #2/#3: Prerequisites + fraud scoring
     // ------------------------------------------------------------------
-    const prereqCheck = await this.checkPrerequisites(studentId, courseId);
-    if (!prereqCheck.eligible) {
-      throw new ForbiddenException({
-        statusCode: 403,
-        error: 'Prerequisites Not Met',
-        message:
-          'You must complete the prerequisite courses below before enrolling ' +
-          'in this course.',
-        missingPrerequisites: prereqCheck.missing,
-      });
-    }
-
-    // ------------------------------------------------------------------
-    // PRE-CHECK #3: Run fraud scoring before writing the enrollment to DB
-    // ------------------------------------------------------------------
-    const fraudResult = await this.fraudDetection.processFraudCheck(
-      null,
-      studentId,
-      courseId,
-      amountPaid,
-    );
-
-    if (fraudResult.action === 'HOLD') {
-      this.logger.warn(
-        `Enrollment BLOCKED by fraud detection: student=${studentId} ` +
-        `course=${courseId} score=${fraudResult.score} reasons=${fraudResult.reasons.join(', ')}`,
-      );
-      throw new HttpException(
-        {
-          statusCode: 423,
-          error: 'Enrollment Locked',
-          message:
-            'Your enrollment has been flagged and placed on hold pending a fraud review. ' +
-            'Please contact support if you believe this is an error.',
-          riskScore: fraudResult.score,
-          reasons: fraudResult.reasons,
-          flagId: fraudResult.flagId,
-        },
-        423,
-      );
-    }
+    const fraudResult = await this.runPreEnrollmentChecks(studentId, courseId, amountPaid);
 
     // ------------------------------------------------------------------
     // STEP 1: Create Payment record (issue #240 — txHash uniqueness)
@@ -169,9 +104,135 @@ export class EnrollmentsService {
       throw error;
     }
 
-    // ------------------------------------------------------------------
-    // POST-CHECK: Persist fraud flag if score is HIGH
-    // ------------------------------------------------------------------
+    // Update course stats
+    await this.prisma.course.update({
+      where: { id: courseId },
+      data: {
+        totalEnrollments: { increment: 1 },
+        totalRevenue: { increment: new Prisma.Decimal(amountPaid) },
+      },
+    });
+
+    await this.runPostEnrollmentSteps(enrollment, fraudResult, txHash, amountPaid);
+
+    this.logger.log(`Enrollment created: ${studentId} → ${courseId} (payment ${txHash})`);
+    return enrollment;
+  }
+
+  // ----------------------------------------------------------
+  // SHARED ENROLLMENT PIPELINE
+  //
+  // Used by create() above and by BundlesService.enroll() so bundle
+  // purchases get the same validation and side effects as single-course
+  // purchases (issue #279).
+  // ----------------------------------------------------------
+
+  /** Rejects enrollment in courses that are not ACTIVE (issue #239). */
+  assertCourseActive(course: { status: CourseStatus }) {
+    if (course.status !== CourseStatus.ACTIVE) {
+      throw new ForbiddenException(
+        `Cannot enroll in a ${course.status} course. Only ACTIVE courses accept enrollments.`,
+      );
+    }
+  }
+
+  /**
+   * Verifies the payment transaction succeeded on-chain (issue #239) and has
+   * not already been used for another purchase (issue #240).
+   */
+  async verifyPaymentTransaction(txHash: string) {
+    const txStatus = await this.stellar.getTransactionStatus(txHash);
+    if (!txStatus) {
+      throw new BadRequestException(
+        `Transaction ${txHash} not found on-chain. Please verify the transaction hash.`,
+      );
+    }
+    if (!txStatus.successful) {
+      throw new BadRequestException(
+        `Transaction ${txHash} did not succeed on-chain (status: ${txStatus.status}).`,
+      );
+    }
+
+    const existingPayment = await this.prisma.payment.findUnique({
+      where: { txHash },
+    });
+    if (existingPayment) {
+      throw new ConflictException(
+        `Payment ${txHash} has already been used. One transaction maps to one purchase.`,
+      );
+    }
+  }
+
+  /**
+   * Enforces course prerequisites (issue #24) and runs fraud scoring before
+   * the enrollment is written. Throws 403 / 423 when the student cannot enroll.
+   */
+  async runPreEnrollmentChecks(
+    studentId: string,
+    courseId: string,
+    amountPaid: number,
+  ): Promise<FraudCheckResult> {
+    const prereqCheck = await this.checkPrerequisites(studentId, courseId);
+    if (!prereqCheck.eligible) {
+      throw new ForbiddenException({
+        statusCode: 403,
+        error: 'Prerequisites Not Met',
+        message:
+          'You must complete the prerequisite courses below before enrolling ' +
+          'in this course.',
+        missingPrerequisites: prereqCheck.missing,
+      });
+    }
+
+    const fraudResult = await this.fraudDetection.processFraudCheck(
+      null,
+      studentId,
+      courseId,
+      amountPaid,
+    );
+
+    if (fraudResult.action === 'HOLD') {
+      this.logger.warn(
+        `Enrollment BLOCKED by fraud detection: student=${studentId} ` +
+        `course=${courseId} score=${fraudResult.score} reasons=${fraudResult.reasons.join(', ')}`,
+      );
+      throw new HttpException(
+        {
+          statusCode: 423,
+          error: 'Enrollment Locked',
+          message:
+            'Your enrollment has been flagged and placed on hold pending a fraud review. ' +
+            'Please contact support if you believe this is an error.',
+          riskScore: fraudResult.score,
+          reasons: fraudResult.reasons,
+          flagId: fraudResult.flagId,
+        },
+        423,
+      );
+    }
+
+    return fraudResult;
+  }
+
+  /**
+   * Side effects that follow a newly created enrollment: fraud flag
+   * persistence, student/instructor notifications, invoice, referral
+   * conversion and drip schedule initialisation.
+   */
+  async runPostEnrollmentSteps(
+    enrollment: {
+      id: string;
+      studentId: string;
+      courseId: string;
+      course: { title: string; instructorAddress: string };
+    },
+    fraudResult: FraudCheckResult,
+    txHash: string,
+    amountPaid: number,
+  ) {
+    const { studentId, courseId } = enrollment;
+
+    // Persist fraud flag if score is HIGH
     if (fraudResult.action === 'FLAG') {
       this.fraudDetection
         .processFraudCheck(enrollment.id, studentId, courseId, amountPaid)
@@ -181,15 +242,6 @@ export class EnrollmentsService {
           ),
         );
     }
-
-    // Update course stats
-    await this.prisma.course.update({
-      where: { id: courseId },
-      data: {
-        totalEnrollments: { increment: 1 },
-        totalRevenue: { increment: new Prisma.Decimal(amountPaid) },
-      },
-    });
 
     // Notify student
     await this.notifications.notifyUser(
@@ -233,9 +285,6 @@ export class EnrollmentsService {
     } catch (error) {
       this.logger.error(`Drip schedule initialization failed for enrollment ${enrollment.id}`, error.message);
     }
-
-    this.logger.log(`Enrollment created: ${studentId} → ${courseId} (payment ${txHash})`);
-    return enrollment;
   }
 
   async findByStudent(studentId: string, page = 1, limit = 20) {

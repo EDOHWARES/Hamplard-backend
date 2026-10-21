@@ -1,6 +1,7 @@
 import { BadRequestException, ForbiddenException, Injectable, Logger, NotFoundException } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { Cron } from '@nestjs/schedule';
+import { GoogleAuth } from 'google-auth-library';
 import * as nodemailer from 'nodemailer';
 import { PrismaService } from '../../common/prisma/prisma.service';
 import { NotificationType } from '@prisma/client';
@@ -323,6 +324,8 @@ export class NotificationsService {
     pdfBuffer: Buffer,
   ): Promise<boolean> {
     const platformName = this.config.get('PLATFORM_NAME', 'Hamplard');
+    const safePlatformName = this.escapeHtml(platformName);
+    const safeCourseTitle = this.escapeHtml(courseTitle);
     try {
       await this.transporter.sendMail({
         from: this.config.get('EMAIL_FROM', 'noreply@hamplard.com'),
@@ -331,9 +334,9 @@ export class NotificationsService {
         text: `Thank you for your purchase of "${courseTitle}". Your invoice #${invoiceNumber} is attached.`,
         html: `
           <div style="font-family:sans-serif;max-width:600px;margin:0 auto;padding:24px;">
-            <h2 style="color:#059669;">${platformName}</h2>
+            <h2 style="color:#059669;">${safePlatformName}</h2>
             <p style="color:#444;line-height:1.6;">
-              Thank you for your purchase of "${courseTitle}". Your invoice #${invoiceNumber} is attached.
+              Thank you for your purchase of "${safeCourseTitle}". Your invoice #${invoiceNumber} is attached.
             </p>
           </div>
         `,
@@ -367,45 +370,95 @@ export class NotificationsService {
       return;
     }
 
-    const serverKey = this.config.get<string>('FIREBASE_SERVER_KEY');
-    if (!serverKey) {
-      this.logger.warn(`Push delivery skipped for ${userId}: FIREBASE_SERVER_KEY is not configured`);
+    let accessToken: string;
+    let projectId: string;
+    try {
+      ({ accessToken, projectId } = await this.getFcmAccessToken());
+    } catch (error) {
+      this.logger.warn(`Push delivery skipped for ${userId}: ${(error as Error).message}`);
       return;
     }
 
-    const fcmUrl = this.config.get<string>('FIREBASE_FCM_URL', 'https://fcm.googleapis.com/fcm/send');
+    const fcmUrl = `https://fcm.googleapis.com/v1/projects/${projectId}/messages:send`;
 
     for (const tokenEntry of tokens) {
       try {
         const response = await fetch(fcmUrl, {
           method: 'POST',
           headers: {
-            Authorization: `key=${serverKey}`,
+            Authorization: `Bearer ${accessToken}`,
             'Content-Type': 'application/json',
           },
           body: JSON.stringify({
-            to: tokenEntry.token,
-            notification: payload.notification,
-            data: payload.data,
+            message: {
+              token: tokenEntry.token,
+              notification: payload.notification,
+              data: payload.data,
+            },
           }),
         });
 
         if (!response.ok) {
-          throw new Error(`FCM returned ${response.status}`);
+          const errorBody = await response.text().catch(() => '');
+          if (this.isInvalidFcmTokenResponse(response.status, errorBody)) {
+            await this.deactivateToken(tokenEntry.token);
+            this.logger.warn(`Deactivated invalid FCM token for ${userId} via ${tokenEntry.platform ?? 'mobile'}`);
+          } else {
+            throw new Error(`FCM returned ${response.status}: ${errorBody.slice(0, 200)}`);
+          }
+          continue;
         }
 
         this.logger.log(`Push delivered for ${userId} via ${tokenEntry.platform ?? 'mobile'}`);
       } catch (error) {
-        this.logger.error(`Push delivery failed for ${userId}`, error.message);
+        this.logger.error(`Push delivery failed for ${userId}`, (error as Error).message);
       }
     }
   }
 
+  private async getFcmAccessToken(): Promise<{ accessToken: string; projectId: string }> {
+    const projectId = this.config.get<string>('FIREBASE_PROJECT_ID');
+    const clientEmail = this.config.get<string>('FIREBASE_CLIENT_EMAIL');
+    const privateKey = this.config.get<string>('FIREBASE_PRIVATE_KEY')?.replace(/\\n/g, '\n');
+
+    if (!projectId || !clientEmail || !privateKey) {
+      throw new Error(
+        'FIREBASE_PROJECT_ID, FIREBASE_CLIENT_EMAIL and FIREBASE_PRIVATE_KEY are not configured',
+      );
+    }
+
+    const auth = new GoogleAuth({
+      credentials: { client_email: clientEmail, private_key: privateKey },
+      scopes: ['https://www.googleapis.com/auth/firebase.messaging'],
+    });
+    const client = await auth.getClient();
+    const token = await client.getAccessToken();
+    const accessToken = typeof token === 'string' ? token : token?.token;
+    if (!accessToken) {
+      throw new Error('Failed to obtain FCM access token');
+    }
+    return { accessToken, projectId };
+  }
+
+  private isInvalidFcmTokenResponse(status: number, body: string): boolean {
+    if (status === 404 || status === 400) {
+      return /UNREGISTERED|INVALID_ARGUMENT|Requested entity was not found|not a valid FCM/i.test(body);
+    }
+    return false;
+  }
+
+  private async deactivateToken(token: string) {
+    await this.prisma.notificationDeviceToken.updateMany({
+      where: { token },
+      data: { isActive: false },
+    });
+  }
+
   private buildPushPayload(type: NotificationType, title: string, message: string, data?: Record<string, any>) {
-    const baseData = {
-      type,
-      ...(data ?? {}),
-    };
+    const baseData: Record<string, string> = {};
+    for (const [key, value] of Object.entries(data ?? {})) {
+      baseData[key] = typeof value === 'string' ? value : JSON.stringify(value ?? '');
+    }
 
     return {
       notification: {
@@ -413,6 +466,7 @@ export class NotificationsService {
         body: message,
       },
       data: {
+        type,
         ...baseData,
         click_action: 'FLUTTER_NOTIFICATION_CLICK',
       },
@@ -461,17 +515,31 @@ export class NotificationsService {
   }
 
   private renderDigestTemplate(userName: string, notifications: Array<{ title: string; message: string }>) {
+    const safeUserName = this.escapeHtml(userName);
     const items = notifications
-      .map((item) => `<li style="margin-bottom:8px;"><strong>${item.title}</strong><div>${item.message}</div></li>`)
+      .map((item) => `<li style="margin-bottom:8px;"><strong>${this.escapeHtml(item.title)}</strong><div>${this.escapeHtml(item.message)}</div></li>`)
       .join('');
 
     return `
       <div style="font-family:sans-serif;max-width:600px;margin:0 auto;padding:24px;">
-        <h2 style="color:#059669;">Hi ${userName}</h2>
+        <h2 style="color:#059669;">Hi ${safeUserName}</h2>
         <p>You have ${notifications.length} unread updates waiting for you.</p>
         <ul>${items}</ul>
       </div>
     `;
+  }
+
+  private escapeHtml(value: string) {
+    return (value ?? '').replace(/[&<>"']/g, (character) => {
+      const entities: Record<string, string> = {
+        '&': '&amp;',
+        '<': '&lt;',
+        '>': '&gt;',
+        '"': '&quot;',
+        "'": '&#39;',
+      };
+      return entities[character];
+    });
   }
 
   private async sendEmail(
@@ -508,11 +576,11 @@ export class NotificationsService {
         text,
         html: `
           <div style="font-family:sans-serif;max-width:600px;margin:0 auto;padding:24px;">
-            <h2 style="color:#059669;">${platformName}</h2>
-            <p style="color:#444;line-height:1.6;">${text}</p>
+            <h2 style="color:#059669;">${this.escapeHtml(platformName)}</h2>
+            <p style="color:#444;line-height:1.6;">${this.escapeHtml(text)}</p>
             <hr style="border:none;border-top:1px solid #eee;margin:24px 0;" />
             <small style="color:#999;">
-              You're receiving this because you have an account on ${platformName}.
+              You're receiving this because you have an account on ${this.escapeHtml(platformName)}.
             </small>
           </div>
         `,

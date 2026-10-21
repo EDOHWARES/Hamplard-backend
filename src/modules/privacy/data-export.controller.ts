@@ -18,7 +18,9 @@ import {
   ApiOkResponse,
   ApiProduces,
 } from '@nestjs/swagger';
+import { UserRole } from '@prisma/client';
 import { JwtAuthGuard } from '../../common/guards/jwt-auth.guard';
+import { RolesGuard, Roles } from '../../common/guards/roles.guard';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
 import { DataExportService } from './data-export.service';
 import { RequestDataExportDto } from './dto/request-data-export.dto';
@@ -112,12 +114,15 @@ export class DataExportController {
 
   /**
    * POST /api/v1/privacy/data-exports/cleanup
-   * Destroy expired export payloads (housekeeping; safe to call anytime).
+   * Destroy expired export payloads across all users. Admin only — the same
+   * purge also runs daily via the scheduler.
    */
   @Post('cleanup')
+  @UseGuards(RolesGuard)
+  @Roles(UserRole.ADMIN)
   @HttpCode(HttpStatus.OK)
   @ApiOperation({
-    summary: 'Expire and purge downloadable payloads of overdue export jobs',
+    summary: 'Expire and purge downloadable payloads of overdue export jobs (admin only)',
   })
   cleanup() {
     return this.dataExportService.cleanupExpiredExports();

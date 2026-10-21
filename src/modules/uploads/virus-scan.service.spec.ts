@@ -98,6 +98,18 @@ describe('VirusScanService', () => {
     expect(status?.details).toBe('Scanner bypassed');
   });
 
+  it('treats VIRUS_SCAN_ENABLED="false" from the environment as disabled', async () => {
+    mockConfigGet.mockReturnValueOnce('false');
+    await service.onModuleInit();
+
+    await service.scanFile('file-env', Buffer.from('test data'));
+
+    expect(mockScanBuffer).not.toHaveBeenCalled();
+    const status = await service.getScanStatus('file-env');
+    expect(status?.status).toBe('clean');
+    expect(status?.details).toBe('Scanner bypassed');
+  });
+
   it('scans a clean file successfully', async () => {
     mockScanBuffer.mockResolvedValueOnce({ isInfected: false, viruses: [] });
 
