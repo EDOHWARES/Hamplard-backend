@@ -1,6 +1,6 @@
 import { NestFactory } from '@nestjs/core';
 import { ValidationPipe, Logger } from '@nestjs/common';
-import { SwaggerModule, DocumentBuilder } from '@nestjs/swagger';
+import { SwaggerModule } from '@nestjs/swagger';
 import { ConfigService } from '@nestjs/config';
 import { Logger as PinoLogger } from 'nestjs-pino';
 import helmet from 'helmet';
@@ -8,6 +8,7 @@ import { AppModule } from './app.module';
 import { HttpExceptionFilter } from './common/filters/http-exception.filter';
 import { TransformInterceptor } from './common/interceptors/transform.interceptor';
 import { initializeSentry } from './common/logging/sentry';
+import { buildSwaggerConfig } from './swagger.config';
 
 async function bootstrap() {
   initializeSentry();
@@ -46,34 +47,7 @@ async function bootstrap() {
   app.useGlobalFilters(new HttpExceptionFilter());
   app.useGlobalInterceptors(new TransformInterceptor());
 
-  const swaggerConfig = new DocumentBuilder()
-    .setTitle('Hamplard API')
-    .setDescription(
-      'Backend API for Hamplard — Africa\'s practical skills online learning platform',
-    )
-    .setVersion('1.0')
-    .addBearerAuth()
-    .addTag('auth',         'Stellar wallet authentication')
-    .addTag('users',        'User profiles and management')
-    .addTag('courses',      'Course creation, approval, and browsing')
-    .addTag('lessons',      'Lesson content and progress')
-    .addTag('enrollments',  'Course enrollment and payments')
-    .addTag('refunds',      'Refund requests and processing')
-    .addTag('bundles',      'Course bundles')
-    .addTag('assignments',  'Practical assignment submission and review')
-    .addTag('certificates', 'Certificate issuance and verification')
-    .addTag('certificate-templates', 'Admin certificate branding, layout, and signature templates')
-    .addTag('events',       'On-chain Stellar event feed')
-    .addTag('notifications','User notifications')
-    .addTag('reports',      'Abuse reports on courses, comments, and profiles')
-    .addTag('reviews',      'Course ratings and reviews')
-    .addTag('health',       'Health check')
-    .addTag('coupons',      'Discount coupon creation and validation')
-    .addTag('disputes',     'Course and payment dispute management')
-    .addTag('kyc',          'Instructor identity verification')
-    .addTag('payouts',      'Instructor payout schedules and processing')
-    .addTag('tags',         'Searchable tag management for courses')
-    .build();
+  const swaggerConfig = buildSwaggerConfig();
 
   const document = SwaggerModule.createDocument(app, swaggerConfig);
   SwaggerModule.setup('docs', app, document, {

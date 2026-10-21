@@ -45,6 +45,11 @@ import { WishlistModule } from './modules/wishlist/wishlist.module';
 import { BadgesModule } from './modules/badges/badges.module';
 import { PrivacyModule } from './modules/privacy/privacy.module';
 import { QuestionsModule } from './modules/lessons/questions.module';
+import { CouponsModule }      from './modules/coupons/coupons.module';
+import { BundlesModule }      from './modules/bundles/bundles.module';
+import { DisputesModule }     from './modules/disputes/disputes.module';
+import { FeatureFlagsModule } from './modules/feature-flags/feature-flags.module';
+import { CronMonitorModule }  from './modules/cron-monitor/cron-monitor.module';
 
 @Module({
   imports: [
@@ -100,6 +105,11 @@ import { QuestionsModule } from './modules/lessons/questions.module';
     BadgesModule,
     PrivacyModule,
     QuestionsModule,
+    CouponsModule,
+    BundlesModule,
+    DisputesModule,
+    FeatureFlagsModule,
+    CronMonitorModule,
   ],
   providers: [
     // Issue #72 — role-based throttling runs before every route's own guards
