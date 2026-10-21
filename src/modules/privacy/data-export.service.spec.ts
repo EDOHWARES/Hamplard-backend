@@ -321,4 +321,20 @@ describe('DataExportService', () => {
       });
     });
   });
+
+  describe('handleScheduledCleanup()', () => {
+    it('runs the global cleanup', async () => {
+      mockPrisma.dataExportJob.updateMany.mockResolvedValue({ count: 1 });
+
+      await service.handleScheduledCleanup();
+
+      expect(mockPrisma.dataExportJob.updateMany).toHaveBeenCalledTimes(1);
+    });
+
+    it('does not throw when the cleanup fails', async () => {
+      mockPrisma.dataExportJob.updateMany.mockRejectedValue(new Error('db down'));
+
+      await expect(service.handleScheduledCleanup()).resolves.toBeUndefined();
+    });
+  });
 });

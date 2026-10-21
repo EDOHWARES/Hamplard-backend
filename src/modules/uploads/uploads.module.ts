@@ -4,6 +4,7 @@ import { UploadsService } from './uploads.service';
 import { UploadsController } from './uploads.controller';
 import { CdnService } from './cdn.service';
 import { CdnController } from './cdn.controller';
+import { FilesController } from './files.controller';
 import { VirusScanService } from './virus-scan.service';
 import { VideoTranscodeService, VideoTranscodeProcessor, TRANSCODE_QUEUE } from './video-transcode.service';
 import { VideoThumbnailService } from './video-thumbnail.service';
@@ -14,7 +15,9 @@ import { VideoThumbnailService } from './video-thumbnail.service';
       name: TRANSCODE_QUEUE,
     }),
   ],
-  controllers: [CdnController, UploadsController],
+  // FilesController must stay last: its GET uploads/* wildcard would
+  // otherwise shadow UploadsController's GET routes.
+  controllers: [CdnController, UploadsController, FilesController],
   providers: [
     UploadsService,
     CdnService,

@@ -1,7 +1,12 @@
 import { Test, TestingModule } from '@nestjs/testing';
-import { StreamableFile } from '@nestjs/common';
+import { ExecutionContext, INestApplication, StreamableFile } from '@nestjs/common';
+import { Reflector } from '@nestjs/core';
+import { UserRole } from '@prisma/client';
+import * as request from 'supertest';
 import { DataExportController } from './data-export.controller';
 import { DataExportService } from './data-export.service';
+import { JwtAuthGuard } from '../../common/guards/jwt-auth.guard';
+import { RolesGuard, ROLES_KEY } from '../../common/guards/roles.guard';
 
 describe('DataExportController', () => {
   let controller: DataExportController;
@@ -92,5 +97,80 @@ describe('DataExportController', () => {
 
       expect(result).toEqual({ count: 2 });
     });
+  });
+});
+
+describe('DataExportController cleanup (Role Authorization)', () => {
+  let app: INestApplication;
+  let currentUserRole: UserRole = UserRole.STUDENT;
+
+  const mockDataExportService = {
+    cleanupExpiredExports: jest.fn().mockResolvedValue({ count: 0 }),
+  };
+
+  const mockJwtGuard = {
+    canActivate: jest.fn((context: ExecutionContext) => {
+      const req = context.switchToHttp().getRequest();
+      req.user = { id: 'user-1', role: currentUserRole };
+      return true;
+    }),
+  };
+
+  beforeAll(async () => {
+    const moduleRef: TestingModule = await Test.createTestingModule({
+      controllers: [DataExportController],
+      providers: [
+        { provide: DataExportService, useValue: mockDataExportService },
+        Reflector,
+        RolesGuard,
+      ],
+    })
+      .overrideGuard(JwtAuthGuard)
+      .useValue(mockJwtGuard)
+      .compile();
+
+    app = moduleRef.createNestApplication();
+    await app.init();
+  });
+
+  afterAll(async () => {
+    await app.close();
+  });
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+  });
+
+  it('has ADMIN role metadata configured on cleanup handler', () => {
+    const reflector = new Reflector();
+    const roles = reflector.get<UserRole[]>(ROLES_KEY, DataExportController.prototype.cleanup);
+    expect(roles).toEqual([UserRole.ADMIN]);
+  });
+
+  it('rejects student callers with 403 Forbidden', async () => {
+    currentUserRole = UserRole.STUDENT;
+
+    const response = await request(app.getHttpServer()).post('/privacy/data-exports/cleanup');
+
+    expect(response.status).toBe(403);
+    expect(mockDataExportService.cleanupExpiredExports).not.toHaveBeenCalled();
+  });
+
+  it('rejects instructor callers with 403 Forbidden', async () => {
+    currentUserRole = UserRole.INSTRUCTOR;
+
+    const response = await request(app.getHttpServer()).post('/privacy/data-exports/cleanup');
+
+    expect(response.status).toBe(403);
+    expect(mockDataExportService.cleanupExpiredExports).not.toHaveBeenCalled();
+  });
+
+  it('allows admin callers', async () => {
+    currentUserRole = UserRole.ADMIN;
+
+    const response = await request(app.getHttpServer()).post('/privacy/data-exports/cleanup');
+
+    expect(response.status).toBe(200);
+    expect(mockDataExportService.cleanupExpiredExports).toHaveBeenCalledTimes(1);
   });
 });

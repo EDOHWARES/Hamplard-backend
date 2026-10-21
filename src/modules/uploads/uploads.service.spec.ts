@@ -20,14 +20,31 @@ jest.mock('clamscan', () => {
 
 jest.mock('fs');
 
+const JPEG_BYTES = Buffer.from([0xff, 0xd8, 0xff, 0xe0, 0x00, 0x10, 0x4a, 0x46]);
+const PNG_BYTES = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+const PDF_BYTES = Buffer.from('%PDF-1.7\n');
+const MP4_BYTES = Buffer.concat([
+  Buffer.from([0x00, 0x00, 0x00, 0x18]),
+  Buffer.from('ftypisom'),
+]);
+
 describe('UploadsService (CDN integration)', () => {
   let service: UploadsService;
   let cdn: CdnService;
+  let configValues: Record<string, string | number>;
 
   beforeEach(async () => {
     (fs.existsSync as jest.Mock).mockReturnValue(true);
     (fs.mkdirSync as jest.Mock).mockImplementation(() => undefined);
     (fs.writeFileSync as jest.Mock).mockImplementation(() => undefined);
+
+    configValues = {
+      UPLOAD_DIR: './uploads',
+      CDN_BASE_URL: 'https://cdn.hamplard.com',
+      CDN_ORIGIN_BASE_URL: 'http://localhost:3000',
+      CDN_SIGNING_SECRET: 'test-secret',
+      CDN_SIGNED_URL_TTL_SECONDS: 3600,
+    };
 
     const module: TestingModule = await Test.createTestingModule({
       providers: [
@@ -76,16 +93,9 @@ describe('UploadsService (CDN integration)', () => {
         {
           provide: ConfigService,
           useValue: {
-            get: jest.fn((key: string, defaultValue?: unknown) => {
-              const map: Record<string, string | number> = {
-                UPLOAD_DIR: './uploads',
-                CDN_BASE_URL: 'https://cdn.hamplard.com',
-                CDN_ORIGIN_BASE_URL: 'http://localhost:3000',
-                CDN_SIGNING_SECRET: 'test-secret',
-                CDN_SIGNED_URL_TTL_SECONDS: 3600,
-              };
-              return map[key] !== undefined ? map[key] : defaultValue;
-            }),
+            get: jest.fn((key: string, defaultValue?: unknown) =>
+              configValues[key] !== undefined ? configValues[key] : defaultValue,
+            ),
           },
         },
       ],
@@ -101,7 +111,7 @@ describe('UploadsService (CDN integration)', () => {
       originalname: 'thumb.jpg',
       mimetype: 'image/jpeg',
       size: 1024,
-      buffer: Buffer.from('x'),
+      buffer: JPEG_BYTES,
     } as Express.Multer.File;
 
     const result = await service.saveFile(file, 'thumbnails');
@@ -117,7 +127,7 @@ describe('UploadsService (CDN integration)', () => {
       originalname: 'id.pdf',
       mimetype: 'application/pdf',
       size: 2048,
-      buffer: Buffer.from('pdf'),
+      buffer: PDF_BYTES,
     } as Express.Multer.File;
 
     const result = await service.saveKycDocument(file, 'instructor-1');
@@ -136,5 +146,95 @@ describe('UploadsService (CDN integration)', () => {
     } as Express.Multer.File;
 
     await expect(service.saveKycDocument(file, 'id')).rejects.toThrow(BadRequestException);
+  });
+
+  describe('file validation (issue #283)', () => {
+    const makeFile = (overrides: Partial<Express.Multer.File>) =>
+      ({
+        originalname: 'file.png',
+        mimetype: 'image/png',
+        size: 1024,
+        buffer: PNG_BYTES,
+        ...overrides,
+      }) as Express.Multer.File;
+
+    it('rejects an HTML file disguised as an image', async () => {
+      const file = makeFile({
+        originalname: 'evil.html',
+        mimetype: 'image/png',
+        buffer: Buffer.from('<html><script>alert(1)</script></html>'),
+      });
+
+      await expect(service.saveFile(file, 'thumbnails')).rejects.toThrow(BadRequestException);
+      expect(fs.writeFileSync).not.toHaveBeenCalled();
+    });
+
+    it('rejects SVG uploads', async () => {
+      const file = makeFile({
+        originalname: 'logo.svg',
+        mimetype: 'image/svg+xml',
+        buffer: Buffer.from('<svg xmlns="http://www.w3.org/2000/svg"></svg>'),
+      });
+
+      await expect(service.saveFile(file, 'thumbnails')).rejects.toThrow(BadRequestException);
+    });
+
+    it('rejects types outside the category allow-list', async () => {
+      const file = makeFile({ originalname: 'doc.pdf', mimetype: 'application/pdf', buffer: PDF_BYTES });
+
+      await expect(service.saveFile(file, 'thumbnails', 'public', 'image')).rejects.toThrow(
+        BadRequestException,
+      );
+      await expect(
+        service.saveFile(file, 'resources', 'public', 'document'),
+      ).resolves.toBeDefined();
+    });
+
+    it('derives the extension from the detected content, not the client filename', async () => {
+      const file = makeFile({ originalname: 'photo.html', mimetype: 'image/jpeg', buffer: JPEG_BYTES });
+
+      const result = await service.saveFile(file, 'thumbnails');
+
+      expect(result.originUrl).toMatch(/\.jpg$/);
+      expect(result.originUrl).not.toContain('.html');
+    });
+
+    it('rejects files larger than the configured category limit', async () => {
+      configValues.MAX_IMAGE_SIZE_MB = 1;
+      const file = makeFile({ size: 2 * 1024 * 1024 });
+
+      await expect(service.saveFile(file, 'thumbnails')).rejects.toThrow(BadRequestException);
+    });
+
+    it('applies MAX_FILE_SIZE_MB as a global ceiling', async () => {
+      configValues.MAX_FILE_SIZE_MB = '1';
+      const file = makeFile({ originalname: 'id.pdf', mimetype: 'application/pdf', buffer: PDF_BYTES, size: 2 * 1024 * 1024 });
+
+      await expect(service.saveKycDocument(file, 'instructor-1')).rejects.toThrow(
+        BadRequestException,
+      );
+    });
+
+    it('validates video content and size', async () => {
+      configValues.MAX_VIDEO_SIZE_MB = 1;
+      const tooBig = makeFile({
+        originalname: 'lesson.mp4',
+        mimetype: 'video/mp4',
+        buffer: MP4_BYTES,
+        size: 2 * 1024 * 1024,
+      });
+      const fake = makeFile({
+        originalname: 'lesson.mp4',
+        mimetype: 'video/mp4',
+        buffer: Buffer.from('not a video at all'),
+      });
+
+      await expect(service.saveVideo(tooBig, 'videos', 'lesson-1')).rejects.toThrow(
+        BadRequestException,
+      );
+      await expect(service.saveVideo(fake, 'videos', 'lesson-1')).rejects.toThrow(
+        BadRequestException,
+      );
+    });
   });
 });

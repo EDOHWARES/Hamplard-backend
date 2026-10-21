@@ -51,7 +51,7 @@ export class UploadsController {
       throw new BadRequestException('courseId is required');
     }
 
-    this.uploadsService.validateFile(file);
+    this.uploadsService.validateFile(file, 'document');
 
     const course = await this.prisma.course.findUnique({
       where: { id: courseId },
@@ -71,7 +71,7 @@ export class UploadsController {
       throw new ForbiddenException('Only the course instructor or an admin can upload course assets');
     }
 
-    return this.uploadsService.saveFile(file, `courses/${courseId}`);
+    return this.uploadsService.saveFile(file, `courses/${courseId}`, 'public', 'document');
   }
 
   @Post('lesson-video')
