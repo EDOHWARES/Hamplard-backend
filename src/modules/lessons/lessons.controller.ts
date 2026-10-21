@@ -3,7 +3,10 @@ import {
 } from '@nestjs/common';
 import { ApiTags, ApiOperation, ApiBearerAuth } from '@nestjs/swagger';
 import { LessonsService } from './lessons.service';
-import { DripScheduleService, ConfigureCourseDripDto, ConfigureLessonDripDto } from './drip-schedule.service';
+import { DripScheduleService } from './drip-schedule.service';
+import { ConfigureCourseDripDto } from './dto/configure-course-drip.dto';
+import { ConfigureLessonDripDto } from './dto/configure-lesson-drip.dto';
+import { OverrideInstructorDripDto } from './dto/override-instructor-drip.dto';
 import { CreateModuleDto } from './dto/create-module.dto';
 import { CreateLessonDto } from './dto/create-lesson.dto';
 import { JwtAuthGuard } from '../../common/guards/jwt-auth.guard';
@@ -139,7 +142,7 @@ export class LessonsController {
   overrideInstructorDrip(
     @Param('enrollmentId') enrollmentId: string,
     @CurrentUser('id') instructorId: string,
-    @Body() body: { lessonId?: string; unlockAt?: string },
+    @Body() body: OverrideInstructorDripDto,
   ) {
     return this.dripScheduleService.overrideInstructorDrip(
       instructorId,

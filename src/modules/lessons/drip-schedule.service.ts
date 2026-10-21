@@ -1,18 +1,13 @@
-import { Injectable, NotFoundException, ForbiddenException, Logger } from '@nestjs/common';
+import { Injectable, NotFoundException, ForbiddenException, Logger, BadRequestException } from '@nestjs/common';
 import { Cron } from '@nestjs/schedule';
 import { PrismaService } from '../../common/prisma/prisma.service';
 import { NotificationsService } from '../notifications/notifications.service';
-import { NotificationType } from '@prisma/client';
+import { NotificationType, UserRole } from '@prisma/client';
+import { ConfigureCourseDripDto } from './dto/configure-course-drip.dto';
+import { ConfigureLessonDripDto } from './dto/configure-lesson-drip.dto';
 
-export interface ConfigureCourseDripDto {
-  enabled: boolean;
-  dripIntervalDays?: number;
-}
-
-export interface ConfigureLessonDripDto {
-  delayDays?: number;
-  unlockDate?: string | Date;
-}
+export { ConfigureCourseDripDto } from './dto/configure-course-drip.dto';
+export { ConfigureLessonDripDto } from './dto/configure-lesson-drip.dto';
 
 @Injectable()
 export class DripScheduleService {
@@ -76,6 +71,9 @@ export class DripScheduleService {
     await this.assertCourseOwnership(lesson.module.courseId, instructorIdOrAddress);
 
     const unlockDateParsed = dto.unlockDate ? new Date(dto.unlockDate) : null;
+    if (unlockDateParsed && Number.isNaN(unlockDateParsed.getTime())) {
+      throw new BadRequestException('unlockDate must be a valid ISO date string');
+    }
 
     const config = await this.prisma.lessonDripConfig.upsert({
       where: { lessonId },
@@ -175,7 +173,9 @@ export class DripScheduleService {
       let unlockAt: Date;
 
       if (!isDripEnabled) {
-        // Immediate unlock if drip is disabled
+        // Immediate unlock if drip is disabled.
+        // Mark as already notified so the unlock cron does not spam
+        // every lesson in a non-drip course right after enrollment (#266).
         unlockAt = enrollment.enrolledAt;
       } else {
         const lessonDrip = lesson.dripConfig;
@@ -193,11 +193,14 @@ export class DripScheduleService {
         where: {
           enrollmentId_lessonId: { enrollmentId, lessonId: lesson.id },
         },
-        update: { unlockAt },
+        update: isDripEnabled
+          ? { unlockAt }
+          : { unlockAt, notifiedAt: existingUnlock?.notifiedAt ?? new Date() },
         create: {
           enrollmentId,
           lessonId: lesson.id,
           unlockAt,
+          ...(!isDripEnabled ? { notifiedAt: new Date() } : {}),
         },
       });
     }
@@ -284,8 +287,19 @@ export class DripScheduleService {
     await this.assertCourseOwnership(enrollment.courseId, instructorIdOrAddress);
 
     const unlockTime = overrideUnlockAt ? new Date(overrideUnlockAt) : new Date();
+    if (Number.isNaN(unlockTime.getTime())) {
+      throw new BadRequestException('unlockAt must be a valid ISO date string');
+    }
 
     if (lessonId) {
+      const lesson = await this.prisma.lesson.findUnique({
+        where: { id: lessonId },
+        include: { module: { select: { courseId: true } } },
+      });
+      if (!lesson) throw new NotFoundException(`Lesson ${lessonId} not found`);
+      if (lesson.module.courseId !== enrollment.courseId) {
+        throw new BadRequestException('Lesson does not belong to the enrollment course');
+      }
       return this.prisma.enrollmentLessonUnlock.upsert({
         where: { enrollmentId_lessonId: { enrollmentId, lessonId } },
         update: {
@@ -410,7 +424,7 @@ export class DripScheduleService {
       },
       include: {
         enrollment: {
-          select: { studentId: true, course: { select: { title: true } } },
+          select: { studentId: true, enrolledAt: true, course: { select: { title: true } } },
         },
         lesson: { select: { title: true } },
       },
@@ -418,6 +432,15 @@ export class DripScheduleService {
     });
 
     for (const unlock of pendingUnlocks) {
+      // Skip immediate unlocks from non-drip courses: their unlockAt equals
+      // the enrollment date, so they were available from the start (#266).
+      if (unlock.unlockAt <= unlock.enrollment.enrolledAt) {
+        await this.prisma.enrollmentLessonUnlock.update({
+          where: { id: unlock.id },
+          data: { notifiedAt: now },
+        });
+        continue;
+      }
       try {
         await this.notifications.notifyUser(
           unlock.enrollment.studentId,
@@ -449,8 +472,18 @@ export class DripScheduleService {
       course.instructorAddress === instructorIdOrAddress ||
       course.instructor?.id === instructorIdOrAddress;
 
-    if (!isMatch) {
-      throw new ForbiddenException('You do not have permission to manage drip settings for this course');
-    }
+    if (isMatch) return;
+
+    // Admins may manage drip settings for any course (#265).
+    const requester = await this.prisma.user.findFirst({
+      where: {
+        OR: [{ id: instructorIdOrAddress }, { stellarAddress: instructorIdOrAddress }],
+      },
+      select: { role: true },
+    });
+
+    if (requester?.role === UserRole.ADMIN) return;
+
+    throw new ForbiddenException('You do not have permission to manage drip settings for this course');
   }
 }
