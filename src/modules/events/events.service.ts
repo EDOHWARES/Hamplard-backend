@@ -6,6 +6,7 @@ import { CONTRACT_EVENT_PAGE_LIMIT, StellarService } from '../../common/stellar/
 import { NotificationsService } from '../notifications/notifications.service';
 import { CoursesService } from '../courses/courses.service';
 import { NotificationType } from '@prisma/client';
+import { Address, scValToNative, xdr } from '@stellar/stellar-sdk';
 
 /** Fixed primary key for the singleton poller checkpoint row. */
 export const EVENT_POLLER_CHECKPOINT_KEY = 'stellar-event-poller';
@@ -531,13 +532,44 @@ export class EventsService implements OnModuleInit, OnModuleDestroy {
   // ----------------------------------------------------------
 
   private extractEventName(event: any): string {
-    try { return event.topic?.[0]?.toString() ?? 'unknown'; }
-    catch { return 'unknown'; }
+    try {
+      const topic = this.decodeScVal(event.topic?.[0]);
+      return typeof topic === 'string' ? topic : topic?.toString?.() ?? 'unknown';
+    } catch {
+      return 'unknown';
+    }
   }
 
   private extractPayload(event: any): any {
-    try { return event.value ? JSON.parse(JSON.stringify(event.value)) : null; }
-    catch { return null; }
+    try {
+      return event.value == null ? null : this.normalizePayload(this.decodeScVal(event.value));
+    } catch {
+      return null;
+    }
+  }
+
+  private decodeScVal(value: any): any {
+    return value instanceof xdr.ScVal ? scValToNative(value) : value;
+  }
+
+  private normalizePayload(value: any): any {
+    if (value instanceof Address) return value.toString();
+    if (typeof value === 'bigint') return value.toString();
+    if (Array.isArray(value)) return value.map((item) => this.normalizePayload(item));
+    if (value instanceof Map) {
+      return Object.fromEntries(
+        [...value.entries()].map(([key, item]) => [
+          this.normalizePayload(key),
+          this.normalizePayload(item),
+        ]),
+      );
+    }
+    if (value && typeof value === 'object') {
+      return Object.fromEntries(
+        Object.entries(value).map(([key, item]) => [key, this.normalizePayload(item)]),
+      );
+    }
+    return value;
   }
 
   /**

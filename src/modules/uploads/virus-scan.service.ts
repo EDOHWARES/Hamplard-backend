@@ -3,6 +3,7 @@ import {
   Logger,
   BadRequestException,
   OnModuleInit,
+  ServiceUnavailableException,
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { PrismaService } from '../../common/prisma/prisma.service';
@@ -26,6 +27,7 @@ export interface ScanResult {
 export class VirusScanService implements OnModuleInit {
   private readonly logger = new Logger(VirusScanService.name);
   private clamscan: any;
+  private initializationPromise?: Promise<boolean>;
   private isEnabled = true;
 
   constructor(
@@ -36,24 +38,12 @@ export class VirusScanService implements OnModuleInit {
   async onModuleInit() {
     this.isEnabled = getBooleanConfig(this.config, 'VIRUS_SCAN_ENABLED', true);
     if (!this.isEnabled) {
+      this.clamscan = undefined;
       this.logger.warn('Virus scanning is disabled via configuration.');
       return;
     }
 
-    try {
-      this.clamscan = await new NodeClam().init({
-        clamdscan: {
-          host: this.config.get<string>('CLAMD_HOST', '127.0.0.1'),
-          port: getNumberConfig(this.config, 'CLAMD_PORT', 3310),
-          timeout: getNumberConfig(this.config, 'CLAMD_TIMEOUT', 5000),
-        },
-        preference: 'clamdscan',
-      });
-      this.logger.log('ClamAV scanner initialized successfully.');
-    } catch (error) {
-      this.logger.error(`Failed to initialize ClamAV: ${error?.message}`);
-      this.isEnabled = false;
-    }
+    await this.initializeScanner();
   }
 
   async scanFile(fileId: string, buffer: Buffer): Promise<void> {
@@ -76,8 +66,8 @@ export class VirusScanService implements OnModuleInit {
       },
     });
 
-    if (!this.isEnabled || !this.clamscan) {
-      this.logger.warn(`Skipping scan for ${fileId}: scanner unavailable`);
+    if (!this.isEnabled) {
+      this.logger.warn(`Skipping scan for ${fileId}: scanning is disabled`);
       await this.prisma.fileScanResult.update({
         where: { fileId },
         data: {
@@ -87,6 +77,19 @@ export class VirusScanService implements OnModuleInit {
         },
       });
       return;
+    }
+
+    if (!(await this.initializeScanner())) {
+      const details = 'Virus scanner is unavailable';
+      await this.prisma.fileScanResult.update({
+        where: { fileId },
+        data: {
+          status: 'error',
+          completedAt: new Date(),
+          details,
+        },
+      });
+      throw new ServiceUnavailableException(details);
     }
 
     await this.prisma.fileScanResult.update({
@@ -144,12 +147,49 @@ export class VirusScanService implements OnModuleInit {
             },
           });
           this.logger.error(`Exhausted retries scanning ${fileId}`);
-          throw new BadRequestException('File scanning failed due to safety timeout');
+          this.clamscan = undefined;
+          throw new ServiceUnavailableException('Virus scanner is unavailable');
         }
 
         await new Promise((res) => setTimeout(res, Math.pow(2, attempt) * 500));
       }
     }
+  }
+
+  getScannerStatus(): { enabled: boolean; available: boolean } {
+    return {
+      enabled: this.isEnabled,
+      available: Boolean(this.clamscan),
+    };
+  }
+
+  private async initializeScanner(): Promise<boolean> {
+    if (!this.isEnabled) return false;
+    if (this.clamscan) return true;
+
+    if (!this.initializationPromise) {
+      this.initializationPromise = (async () => {
+        try {
+          this.clamscan = await new NodeClam().init({
+            clamdscan: {
+              host: this.config.get<string>('CLAMD_HOST', '127.0.0.1'),
+              port: getNumberConfig(this.config, 'CLAMD_PORT', 3310),
+              timeout: getNumberConfig(this.config, 'CLAMD_TIMEOUT', 5000),
+            },
+            preference: 'clamdscan',
+          });
+          this.logger.log('ClamAV scanner initialized successfully.');
+          return true;
+        } catch (error) {
+          this.logger.error(`Failed to initialize ClamAV: ${error?.message}`);
+          return false;
+        } finally {
+          this.initializationPromise = undefined;
+        }
+      })();
+    }
+
+    return this.initializationPromise;
   }
 
   async getScanStatus(fileId: string): Promise<ScanResult | undefined> {

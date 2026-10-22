@@ -2,7 +2,7 @@ import { Test, TestingModule } from '@nestjs/testing';
 import { LiveSessionsService } from './live-sessions.service';
 import { PrismaService } from '../../common/prisma/prisma.service';
 import { ConflictException, ForbiddenException } from '@nestjs/common';
-import { LiveSessionStatus } from '@prisma/client';
+import { EnrollmentStatus, LiveSessionStatus, UserRole } from '@prisma/client';
 
 describe('LiveSessionsService', () => {
   let service: LiveSessionsService;
@@ -18,6 +18,7 @@ describe('LiveSessionsService', () => {
     },
     enrollment: {
       findUnique: jest.fn(),
+      findMany: jest.fn(),
     },
     liveSessionRsvp: {
       create: jest.fn(),
@@ -174,6 +175,108 @@ describe('LiveSessionsService', () => {
 
       const res = await service.rsvpToSession({ id: 'student-1' }, 'sess-1');
       expect(res.id).toBe('rsvp-1');
+    });
+
+    describe('read access to session meeting links', () => {
+      const sessionRecord = (overrides: Record<string, any> = {}) => ({
+        id: 'session-1',
+        courseId: 'course-1',
+        instructorAddress: 'G_INSTRUCTOR',
+        title: 'Live Workshop',
+        meetingUrl: 'https://meet.example/session-1',
+        course: {
+          id: 'course-1',
+          title: 'Course title',
+          thumbnailUrl: 'https://cdn.example/course.png',
+          price: 99,
+          instructor: { id: 'instructor-1' },
+        },
+        ...overrides,
+      });
+
+      it('does not return the meeting URL to anonymous callers and only returns a course summary', async () => {
+        mockPrisma.liveSession.findUnique.mockResolvedValue(sessionRecord());
+
+        const result = await service.getSessionById('session-1');
+
+        expect(result).not.toHaveProperty('meetingUrl');
+        expect(result.course).toEqual({
+          id: 'course-1',
+          title: 'Course title',
+          thumbnailUrl: 'https://cdn.example/course.png',
+        });
+        expect(result.course).not.toHaveProperty('price');
+        expect(mockPrisma.enrollment.findMany).not.toHaveBeenCalled();
+      });
+
+      it('does not return the meeting URL to an authenticated non-enrolled caller', async () => {
+        mockPrisma.liveSession.findUnique.mockResolvedValue(sessionRecord());
+        mockPrisma.enrollment.findMany.mockResolvedValue([]);
+
+        const result = await service.getSessionById('session-1', {
+          id: 'student-1',
+          role: UserRole.STUDENT,
+        });
+
+        expect(result).not.toHaveProperty('meetingUrl');
+        expect(mockPrisma.enrollment.findMany).toHaveBeenCalledWith({
+          where: {
+            studentId: 'student-1',
+            courseId: { in: ['course-1'] },
+            status: { not: EnrollmentStatus.REFUNDED },
+          },
+          select: { courseId: true },
+        });
+      });
+
+      it('returns the meeting URL to an enrolled caller', async () => {
+        mockPrisma.liveSession.findUnique.mockResolvedValue(sessionRecord());
+        mockPrisma.enrollment.findMany.mockResolvedValue([{ courseId: 'course-1' }]);
+
+        const result = await service.getSessionById('session-1', {
+          id: 'student-1',
+          role: UserRole.STUDENT,
+        });
+
+        expect(result.meetingUrl).toBe('https://meet.example/session-1');
+      });
+
+      it.each([
+        ['instructor', { id: 'instructor-1', role: UserRole.INSTRUCTOR }],
+        ['admin', { id: 'admin-1', role: UserRole.ADMIN }],
+      ])('returns the meeting URL to an authorized %s', async (_label, user) => {
+        mockPrisma.liveSession.findUnique.mockResolvedValue(sessionRecord());
+
+        const result = await service.getSessionById('session-1', user);
+
+        expect(result.meetingUrl).toBe('https://meet.example/session-1');
+        expect(mockPrisma.enrollment.findMany).not.toHaveBeenCalled();
+      });
+
+      it('does not grant access for a refunded enrollment', async () => {
+        mockPrisma.liveSession.findUnique.mockResolvedValue(sessionRecord());
+        mockPrisma.enrollment.findMany.mockResolvedValue([]);
+
+        const result = await service.getSessionById('session-1', {
+          id: 'student-1',
+          role: UserRole.STUDENT,
+        });
+
+        expect(result).not.toHaveProperty('meetingUrl');
+      });
+
+      it('applies the same privacy and course projection to upcoming sessions', async () => {
+        mockPrisma.liveSession.findMany.mockResolvedValue([sessionRecord()]);
+
+        const result = await service.getUpcomingSessions();
+
+        expect(result[0]).not.toHaveProperty('meetingUrl');
+        expect(result[0].course).toEqual({
+          id: 'course-1',
+          title: 'Course title',
+          thumbnailUrl: 'https://cdn.example/course.png',
+        });
+      });
     });
 
     it('should cancel RSVP successfully', async () => {
